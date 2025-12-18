@@ -94,6 +94,8 @@ public:
 
 private:
     nixlTelemetryPlugin *plugin_;
+    mutable std::string cached_name_;
+    mutable std::string cached_version_;
 };
 
 typedef std::shared_ptr<const nixlPluginHandle> (

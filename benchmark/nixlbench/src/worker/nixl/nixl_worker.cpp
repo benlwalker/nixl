@@ -231,8 +231,8 @@ xferBenchNixlWorker::xferBenchNixlWorker(int *argc, char ***argv, std::vector<st
         }
 
         // Parse and configure GUSLI devices from general device_list parameter
-        int expected_num_devices =
-            isInitiator() ? xferBenchConfig::num_initiator_dev : xferBenchConfig::num_target_dev;
+        // For storage backends without ETCD, use num_target_dev since storage devices are targets
+        int expected_num_devices = xferBenchConfig::num_target_dev;
         gusli_devices = parseGusliDeviceList(xferBenchConfig::device_list,
                                              xferBenchConfig::gusli_device_security,
                                              expected_num_devices);
@@ -657,6 +657,8 @@ xferBenchNixlWorker::allocateMemory(int num_threads) {
     size_t i, buffer_size, num_devices = 0;
     nixl_opt_args_t opt_args;
 
+    // For storage backends without ETCD, always use num_initiator_dev for DRAM buffers
+    // The storage device count is handled separately via num_target_dev
     if (isInitiator()) {
         num_devices = xferBenchConfig::num_initiator_dev;
     } else if (isTarget()) {
@@ -713,13 +715,25 @@ xferBenchNixlWorker::allocateMemory(int num_threads) {
             exit(EXIT_FAILURE);
         }
 
+        // For GUSLI, num_target_dev determines storage device count
+        // Calculate storage buffer size based on num_target_dev
+        size_t num_storage_devices = gusli_devices.size();
+        size_t storage_buffer_size =
+            xferBenchConfig::total_buffer_size / (num_storage_devices * num_threads);
+
+        if (xferBenchConfig::storage_enable_direct) {
+            storage_buffer_size = ((storage_buffer_size + xferBenchConfig::page_size - 1) /
+                                   xferBenchConfig::page_size) *
+                xferBenchConfig::page_size;
+        }
+
         if (xferBenchConfig::op_type == XFERBENCH_OP_READ) {
             for (auto &device : gusli_devices) {
                 if (device.device_type == 'F') {
                     std::vector<xferFileState> fstate =
                         createFileFds(getName(), 1, {device.device_path});
                     if (!initBasicDescFile(
-                            xferBenchConfig::total_buffer_size, fstate[0], device.device_id)) {
+                            storage_buffer_size * num_threads, fstate[0], device.device_id)) {
                         std::cerr << "Failed to create file: " << device.device_path << std::endl;
                         for (auto &f : fstate) {
                             close(f.fd);
@@ -732,10 +746,10 @@ xferBenchNixlWorker::allocateMemory(int num_threads) {
 
         for (int list_idx = 0; list_idx < num_threads; list_idx++) {
             std::vector<xferBenchIOV> iov_list;
-            for (i = 0; i < num_devices; i++) {
+            for (i = 0; i < num_storage_devices; i++) {
                 std::optional<xferBenchIOV> basic_desc;
-                // Use device IDs from parsed configuration (num_devices == gusli_devices.size())
-                basic_desc = initBasicDescBlk(buffer_size, gusli_devices[i].device_id);
+                // Use device IDs from parsed configuration
+                basic_desc = initBasicDescBlk(storage_buffer_size, gusli_devices[i].device_id);
                 if (basic_desc) {
                     iov_list.push_back(basic_desc.value());
                 }

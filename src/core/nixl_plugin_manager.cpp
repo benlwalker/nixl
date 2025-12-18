@@ -152,7 +152,10 @@ nixlTelemetryPluginHandle::createExporter(
 const char *
 nixlTelemetryPluginHandle::getName() const {
     if (plugin_) {
-        return plugin_->getName().data();
+        if (cached_name_.empty()) {
+            cached_name_ = plugin_->getName();
+        }
+        return cached_name_.c_str();
     }
     return "unknown";
 }
@@ -160,7 +163,10 @@ nixlTelemetryPluginHandle::getName() const {
 const char *
 nixlTelemetryPluginHandle::getVersion() const {
     if (plugin_) {
-        return plugin_->getVersion().data();
+        if (cached_version_.empty()) {
+            cached_version_ = plugin_->getVersion();
+        }
+        return cached_version_.c_str();
     }
     return "unknown";
 }

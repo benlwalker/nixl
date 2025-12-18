@@ -521,13 +521,26 @@ std::vector<std::string> xferBenchConfig::parseDeviceList() {
             devices.push_back(dev);
 	    }
 
-	    if ((int)devices.size() != xferBenchConfig::num_initiator_dev ||
-            (int)devices.size() != xferBenchConfig::num_target_dev) {
-	    	std::cerr << "Incorrect device list " << xferBenchConfig::device_list
-                      << " provided for pairwise scheme " << devices.size()
-                      << "# devices" << std::endl;
-	    	return {};
-	    }
+        // For storage backends, device list represents target (storage) devices
+        // For network backends, device list must match both initiator and target counts
+        if (xferBenchConfig::isStorageBackend()) {
+            // Storage backends: device list should match num_target_dev
+            if ((int)devices.size() != xferBenchConfig::num_target_dev) {
+                std::cerr << "Incorrect device list " << xferBenchConfig::device_list
+                          << " provided for storage backend: " << devices.size()
+                          << " devices, expected " << xferBenchConfig::num_target_dev << std::endl;
+                return {};
+            }
+        } else {
+            // Network backends: device list must match both initiator and target counts
+            if ((int)devices.size() != xferBenchConfig::num_initiator_dev ||
+                (int)devices.size() != xferBenchConfig::num_target_dev) {
+                std::cerr << "Incorrect device list " << xferBenchConfig::device_list
+                          << " provided for pairwise scheme " << devices.size() << "# devices"
+                          << std::endl;
+                return {};
+            }
+        }
     } else {
         devices.push_back("all");
     }
