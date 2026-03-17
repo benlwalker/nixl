@@ -140,36 +140,40 @@ class nixlLocalSection : public nixlMemSection {
                     nixlSecDescList &remote_self);
 
         // Each nixlBasicDesc should be same as original registration region
-        nixl_status_t remDescList (const nixl_reg_dlist_t &mem_elms,
-                                   nixlBackendEngine* backend);
+        nixl_status_t
+        remDescList(const nixl_reg_dlist_t &mem_elms, nixlBackendEngine *backend);
 
         nixl_status_t serialize(nixlSerDes* serializer) const;
 
-        nixl_status_t serializePartial(nixlSerDes* serializer,
-                                       const backend_set_t &backends,
-                                       const nixl_reg_dlist_t &mem_elms) const;
+        nixl_status_t
+        serializePartial(nixlSerDes *serializer,
+                         const backend_set_t &backends,
+                         const nixl_reg_dlist_t &mem_elms) const;
 
         ~nixlLocalSection();
 };
 
-
 class nixlRemoteSection : public nixlMemSection {
-    private:
-        std::string agentName;
+private:
+    std::string agentName;
 
-        nixl_status_t addDescList (
-                           const nixl_reg_dlist_t &mem_elms,
-                           nixlBackendEngine *backend);
-    public:
-        explicit nixlRemoteSection(std::string agent_name) noexcept;
+    nixl_status_t
+    addDescList(const nixl_reg_dlist_t &mem_elms, nixlBackendEngine *backend);
 
-        nixl_status_t loadRemoteData (nixlSerDes* deserializer,
-                                      backend_map_t &backendToEngineMap);
+public:
+    explicit nixlRemoteSection(std::string agent_name) noexcept;
 
-        // When adding self as a remote agent for local operations
-        nixl_status_t
-        loadLocalData(const nixlSecDescList &mem_elms, nixlBackendEngine *backend);
-        ~nixlRemoteSection();
+    nixl_status_t
+    loadRemoteData(nixlSerDes *deserializer, backend_map_t &backendToEngineMap);
+
+    // When adding self as a remote agent for local operations
+    nixl_status_t
+    loadLocalData(const nixlSecDescList &mem_elms, nixlBackendEngine *backend);
+
+    nixl_status_t
+    remLocalData(const nixl_reg_dlist_t &mem_elms, nixlBackendEngine *backend);
+
+    ~nixlRemoteSection();
 };
 
 #endif
