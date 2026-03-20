@@ -359,6 +359,44 @@ nixlSecDescList::addDesc(const nixlSectionDesc &desc) {
         vec.insert(itr, desc);
 }
 
+void
+nixlSecDescList::mergeDescs(std::vector<nixlSectionDesc> &sorted_new) {
+    if (sorted_new.empty()) return;
+
+    auto &existing = this->descs;
+    if (existing.empty()) {
+        existing.swap(sorted_new);
+        return;
+    }
+
+    std::vector<nixlSectionDesc> merged;
+    merged.reserve(existing.size() + sorted_new.size());
+    std::merge(existing.begin(),
+               existing.end(),
+               sorted_new.begin(),
+               sorted_new.end(),
+               std::back_inserter(merged));
+    existing.swap(merged);
+}
+
+void
+nixlSecDescList::bulkRemove(std::vector<int> &sorted_indices) {
+    if (sorted_indices.empty()) return;
+
+    auto &vec = this->descs;
+    size_t ri = 0;
+    size_t write = 0;
+    for (size_t read = 0; read < vec.size(); ++read) {
+        if (ri < sorted_indices.size() && static_cast<int>(read) == sorted_indices[ri]) {
+            ++ri;
+        } else {
+            if (write != read) vec[write] = std::move(vec[read]);
+            ++write;
+        }
+    }
+    vec.resize(write);
+}
+
 bool
 nixlSecDescList::verifySorted() const {
     const auto &vec = this->descs;

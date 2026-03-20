@@ -76,6 +76,12 @@ public:
     void
     addDesc(const nixlSectionDesc &desc) override;
 
+    void
+    mergeDescs(std::vector<nixlSectionDesc> &sorted_new);
+
+    void
+    bulkRemove(std::vector<int> &sorted_indices);
+
     bool
     verifySorted() const;
 
