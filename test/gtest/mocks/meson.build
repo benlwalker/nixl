@@ -19,7 +19,6 @@ mock_backend_sources = ['gmock_engine.cpp', 'mock_backend_plugin.cpp', 'mock_bac
 mock_backend_plugin = shared_library('MOCK_BACKEND', mock_backend_sources,
                dependencies: [nixl_infra, nixl_common_dep, gmock_dep],
                include_directories: [nixl_inc_dirs, utils_inc_dirs, gtest_inc_dirs],
-               link_with : [ucx_backend_lib],
                name_prefix: 'libplugin_',
                install: true,
                install_dir: plugin_install_dir)

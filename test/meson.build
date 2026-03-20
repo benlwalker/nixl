@@ -16,6 +16,6 @@
 subdir('nixl')
 subdir('unit')
 
-if ucx_dep.found()
+if enabled_plugins.get('UCX')
     subdir('gtest')
 endif
