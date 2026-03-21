@@ -416,6 +416,7 @@ nixlAgent::queryMem(const nixl_reg_dlist_t &descs,
         return NIXL_ERR_INVALID_PARAM;
     }
 
+    NIXL_SHARED_LOCK_GUARD(data->lock);
     return extra_params->backends[0]->engine->queryMem(descs, resp);
 }
 
