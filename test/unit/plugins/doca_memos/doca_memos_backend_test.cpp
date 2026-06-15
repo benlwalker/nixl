@@ -16,7 +16,9 @@
  */
 
 #include <gtest/gtest.h>
+#include <initializer_list>
 #include <memory>
+#include <string>
 #include <vector>
 #include <cstring>
 
@@ -93,6 +95,53 @@ protected:
     std::unique_ptr<nixl_b_params_t> backend_params_;
 };
 
+namespace {
+
+std::string
+keyBytes(const docaMemosKey &key) {
+    return std::string(reinterpret_cast<const char *>(key.key), key.keyLen);
+}
+
+std::string
+bytes(std::initializer_list<uint8_t> values) {
+    std::string out;
+    out.reserve(values.size());
+    for (uint8_t value : values) {
+        out.push_back(static_cast<char>(value));
+    }
+    return out;
+}
+
+std::string
+devIdBytes(uint64_t dev_id) {
+    return std::string(reinterpret_cast<const char *>(&dev_id), sizeof(dev_id));
+}
+
+void
+expectKeyBytes(const docaMemosKey &key, const std::string &expected) {
+    ASSERT_EQ(expected.size(), key.keyLen);
+    EXPECT_EQ(expected, keyBytes(key));
+}
+
+constexpr const char *kShortStringKey = "short-key";
+constexpr const char *kLongStringKey = "this-is-a-long-application-object-key";
+constexpr const char *kHexLookingKey = "00112233445566778899aabbccddeeff";
+
+const std::string kShortStringBlake2b128 =
+    bytes({0xcb, 0x14, 0x14, 0x08, 0x31, 0xcf, 0x3e, 0x3b,
+           0x47, 0xc0, 0xbd, 0x73, 0x9f, 0x48, 0xd4, 0xf3});
+const std::string kLongStringBlake2b128 =
+    bytes({0xdf, 0x29, 0x94, 0xb4, 0xd6, 0x6c, 0xb5, 0x05,
+           0x2f, 0x8a, 0xa1, 0xbb, 0xb2, 0x3f, 0xb9, 0xed});
+const std::string kHexLookingBlake2b128 =
+    bytes({0xcf, 0x99, 0x21, 0xf4, 0xf6, 0x26, 0x19, 0x29,
+           0x59, 0x51, 0x82, 0x9e, 0x3d, 0x56, 0xad, 0x56});
+const std::string kHexDecodedKey =
+    bytes({0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+           0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff});
+
+} // namespace
+
 // ============================================================================
 // Constructor/Destructor Tests
 // ============================================================================
@@ -126,6 +175,29 @@ TEST_F(DocMemosBackendTest, ConstructorWithProgressThread) {
     setupInitParams(true); // Enable progress thread
     createEngine();
     EXPECT_TRUE(engine_ != nullptr);
+}
+
+TEST_F(DocMemosBackendTest, ConvertKeyTo128bitDefaultOmitted) {
+    createEngine();
+    EXPECT_FALSE(engine_->getInitErr());
+}
+
+TEST_F(DocMemosBackendTest, ConvertKeyTo128bitExplicitTrue) {
+    (*backend_params_)["convert_key_to_128bit"] = "true";
+    createEngine();
+    EXPECT_FALSE(engine_->getInitErr());
+}
+
+TEST_F(DocMemosBackendTest, ConvertKeyTo128bitExplicitFalse) {
+    (*backend_params_)["convert_key_to_128bit"] = "false";
+    createEngine();
+    EXPECT_FALSE(engine_->getInitErr());
+}
+
+TEST_F(DocMemosBackendTest, ConvertKeyTo128bitInvalidValue) {
+    (*backend_params_)["convert_key_to_128bit"] = "yes";
+    createEngine();
+    EXPECT_TRUE(engine_->getInitErr());
 }
 
 // ============================================================================
@@ -179,6 +251,95 @@ TEST_F(DocMemosBackendTest, RegisterMemUnsupportedType) {
 
     nixl_status_t status = engine_->registerMem(desc, unsupported_mem, out);
     EXPECT_NE(status, NIXL_SUCCESS);
+}
+
+TEST_F(DocMemosBackendTest, RegisterMemLongStringMetaInfoFailsDefaultMode) {
+    createEngine();
+
+    nixlBlobDesc desc;
+    desc.devId = 1234;
+    desc.metaInfo = kLongStringKey;
+    nixlBackendMD *out = nullptr;
+
+    EXPECT_EQ(engine_->registerMem(desc, OBJ_SEG, out), NIXL_ERR_INVALID_PARAM);
+    EXPECT_EQ(out, nullptr);
+}
+
+TEST_F(DocMemosBackendTest, RegisterMemLongStringMetaInfoSucceedsInHashMode) {
+    (*backend_params_)["convert_key_to_128bit"] = "true";
+    createEngine();
+
+    nixlBlobDesc desc;
+    desc.devId = 1234;
+    desc.metaInfo = kLongStringKey;
+    nixlBackendMD *out = nullptr;
+
+    EXPECT_EQ(engine_->registerMem(desc, OBJ_SEG, out), NIXL_SUCCESS);
+    ASSERT_NE(out, nullptr);
+
+    engine_->deregisterMem(out);
+}
+
+// ============================================================================
+// Key Resolver Tests
+// ============================================================================
+
+TEST_F(DocMemosBackendTest, ResolveDefaultModeEmptyMetaInfoUsesDevIdBytes) {
+    docaMemosKey key;
+    uint64_t dev_id = 0;
+
+    ASSERT_TRUE(nixlDocaMemosEngine::resolveMemosKey(dev_id, "", key));
+    expectKeyBytes(key, devIdBytes(dev_id));
+}
+
+TEST_F(DocMemosBackendTest, ResolveDefaultModeHexStringDecodesToSixteenBytes) {
+    docaMemosKey key;
+
+    ASSERT_TRUE(nixlDocaMemosEngine::resolveMemosKey(999, kHexLookingKey, key));
+    expectKeyBytes(key, kHexDecodedKey);
+}
+
+TEST_F(DocMemosBackendTest, ResolveDefaultModeShortNonHexStringUsesRawBytes) {
+    docaMemosKey key;
+
+    ASSERT_TRUE(nixlDocaMemosEngine::resolveMemosKey(999, kShortStringKey, key));
+    expectKeyBytes(key, kShortStringKey);
+}
+
+TEST_F(DocMemosBackendTest, ResolveDefaultModeLongNonHexStringIsRejected) {
+    docaMemosKey key;
+
+    EXPECT_FALSE(nixlDocaMemosEngine::resolveMemosKey(999, kLongStringKey, key));
+}
+
+TEST_F(DocMemosBackendTest, ResolveHashModeEmptyMetaInfoStillUsesDevIdBytes) {
+    docaMemosKey key;
+    uint64_t dev_id = 0;
+
+    ASSERT_TRUE(nixlDocaMemosEngine::resolveMemosKey(dev_id, "", key, true));
+    expectKeyBytes(key, devIdBytes(dev_id));
+}
+
+TEST_F(DocMemosBackendTest, ResolveHashModeShortStringUsesGoldenBlake2b128Digest) {
+    docaMemosKey key;
+
+    ASSERT_TRUE(nixlDocaMemosEngine::resolveMemosKey(999, kShortStringKey, key, true));
+    expectKeyBytes(key, kShortStringBlake2b128);
+}
+
+TEST_F(DocMemosBackendTest, ResolveHashModeLongStringUsesGoldenBlake2b128Digest) {
+    docaMemosKey key;
+
+    ASSERT_TRUE(nixlDocaMemosEngine::resolveMemosKey(999, kLongStringKey, key, true));
+    expectKeyBytes(key, kLongStringBlake2b128);
+}
+
+TEST_F(DocMemosBackendTest, ResolveHashModeHexLookingStringIsHashedNotDecoded) {
+    docaMemosKey key;
+
+    ASSERT_TRUE(nixlDocaMemosEngine::resolveMemosKey(999, kHexLookingKey, key, true));
+    expectKeyBytes(key, kHexLookingBlake2b128);
+    EXPECT_NE(kHexDecodedKey, keyBytes(key));
 }
 
 // ============================================================================
@@ -318,6 +479,47 @@ TEST_F(DocMemosBackendTest, QueryMemActualKeyExists) {
     nixlBlobDesc desc;
     desc.devId = 700;
     desc.metaInfo = "exists";
+    reg_dlist.addDesc(desc);
+
+    std::vector<nixl_query_resp_t> resp;
+    EXPECT_EQ(engine_->queryMem(reg_dlist, resp), NIXL_SUCCESS);
+    ASSERT_EQ(resp.size(), 1u);
+    EXPECT_TRUE(resp[0].has_value());
+}
+
+TEST_F(DocMemosBackendTest, QueryMemActualHashModeUsesBlake2DerivedKey) {
+    setupInitParams(false);
+    (*backend_params_)["query_mem_mode"] = "actual";
+    (*backend_params_)["convert_key_to_128bit"] = "true";
+    createEngine();
+    auto &mock = DocaMockControl::instance();
+    mock.auto_complete_tasks = true;
+    mock.kv_store[kLongStringBlake2b128] = std::vector<uint8_t>(8, 0x42);
+
+    nixl_reg_dlist_t reg_dlist(OBJ_SEG);
+    nixlBlobDesc desc;
+    desc.devId = 702;
+    desc.metaInfo = kLongStringKey;
+    reg_dlist.addDesc(desc);
+
+    std::vector<nixl_query_resp_t> resp;
+    EXPECT_EQ(engine_->queryMem(reg_dlist, resp), NIXL_SUCCESS);
+    ASSERT_EQ(resp.size(), 1u);
+    EXPECT_TRUE(resp[0].has_value());
+}
+
+TEST_F(DocMemosBackendTest, QueryMemActualDefaultModeUsesHexDecodedKey) {
+    setupInitParams(false);
+    (*backend_params_)["query_mem_mode"] = "actual";
+    createEngine();
+    auto &mock = DocaMockControl::instance();
+    mock.auto_complete_tasks = true;
+    mock.kv_store[kHexDecodedKey] = std::vector<uint8_t>(8, 0x42);
+
+    nixl_reg_dlist_t reg_dlist(OBJ_SEG);
+    nixlBlobDesc desc;
+    desc.devId = 703;
+    desc.metaInfo = kHexLookingKey;
     reg_dlist.addDesc(desc);
 
     std::vector<nixl_query_resp_t> resp;

@@ -469,7 +469,8 @@ nixlNoThreadProgressEngine::progress() const {
 void
 nixlDocaMemosProgressEngine::prepareQueryHandles(
     const nixl_reg_dlist_t &descs,
-    std::vector<nixlDocaMemosBackendReqH> &query_handles) const {
+    std::vector<nixlDocaMemosBackendReqH> &query_handles,
+    bool convert_key_to_128bit) const {
     size_t count = static_cast<size_t>(descs.descCount());
     // reserve() is load-bearing: callers stash &query_handles[i] in DOCA's
     // task_user_data, so the vector must not reallocate during emplace_back.
@@ -484,7 +485,7 @@ nixlDocaMemosProgressEngine::prepareQueryHandles(
 
         const auto &desc = descs[i];
         if (!nixlDocaMemosEngine::resolveMemosKey(
-                desc.devId, desc.metaInfo, req_h.objectKeys_[0])) {
+                desc.devId, desc.metaInfo, req_h.objectKeys_[0], convert_key_to_128bit)) {
             NIXL_ERROR << "Failed to resolve key for descriptor " << i;
             handleSubmissionFailure(&req_h, NIXL_ERR_INVALID_PARAM);
         }
@@ -600,11 +601,12 @@ nixlNoThreadProgressEngine::checkXfer(nixlDocaMemosBackendReqH *req_h) const {
 
 nixl_status_t
 nixlNoThreadProgressEngine::queryMem(const nixl_reg_dlist_t &descs,
-                                     std::vector<nixl_query_resp_t> &resp) const {
+                                     std::vector<nixl_query_resp_t> &resp,
+                                     bool convert_key_to_128bit) const {
     resp.reserve(descs.descCount());
 
     std::vector<nixlDocaMemosBackendReqH> query_handles;
-    prepareQueryHandles(descs, query_handles);
+    prepareQueryHandles(descs, query_handles, convert_key_to_128bit);
 
     // See nixlThreadedProgressEngine::queryMem for the lifetime contract:
     // &query_handles[i] is published into pendingRequests_ and into DOCA's
@@ -953,12 +955,13 @@ nixlThreadedProgressEngine::progressThreadFunc() {
 
 nixl_status_t
 nixlThreadedProgressEngine::queryMem(const nixl_reg_dlist_t &descs,
-                                     std::vector<nixl_query_resp_t> &resp) const {
+                                     std::vector<nixl_query_resp_t> &resp,
+                                     bool convert_key_to_128bit) const {
     size_t count = static_cast<size_t>(descs.descCount());
     resp.reserve(count);
 
     std::vector<nixlDocaMemosBackendReqH> query_handles;
-    prepareQueryHandles(descs, query_handles);
+    prepareQueryHandles(descs, query_handles, convert_key_to_128bit);
 
     // Lifetime contract: we hand &query_handles[i] to the progress thread via
     // producerVec_. Two invariants must hold for this to stay safe:

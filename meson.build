@@ -360,6 +360,14 @@ endif
 doca_kv_dep = dependency('doca-kv', required: false)
 doca_common_dep = dependency('doca-common', required: false)
 
+# libb2 provides Blake2 for the DOCA_MEMOS optional string-to-128-bit key mode.
+# Prefer pkg-config when present, but accept environments that only provide
+# libb2 as a linkable system library.
+libb2_dep = dependency('libb2', required: false)
+if not libb2_dep.found()
+    libb2_dep = cpp.find_library('b2', required: false)
+endif
+
 # UCX GPU device API detection
 nvcc_prog = find_program('nvcc', required: false)
 ucx_gpu_device_api_available = false

@@ -43,6 +43,7 @@ doca_memos_backend_test = executable(
         absl_log_dep,
         nixl_infra,  # For nixl_time and other infra
         dependency('threads'),
+        libb2_dep,
         # Headers only: the DOCA functions are provided by doca_memos_mocks.cpp,
         # so pull in the real KV API declarations without linking libdoca_kv.
         doca_kv_dep.partial_dependency(includes: true, compile_args: true),

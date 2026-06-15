@@ -29,6 +29,8 @@
 #include <chrono>
 #include <cstring>
 
+#include <blake2.h>
+
 // DOCA headers
 #include <doca_kvdev.h>
 #include <doca_nvme_kernel_kvdev.h>
@@ -170,6 +172,19 @@ nixlDocaMemosEngine::parseInitParams(const nixl_b_params_t *params) {
             ignoreReadNotFound_ = false;
         } else {
             NIXL_ERROR << "Invalid ignore_read_not_found '" << it->second
+                       << "', expected 'true' or 'false'";
+            return NIXL_ERR_INVALID_PARAM;
+        }
+    }
+
+    it = params->find("convert_key_to_128bit");
+    if (it != params->end()) {
+        if (it->second == "true") {
+            convertKeyTo128bit_ = true;
+        } else if (it->second == "false") {
+            convertKeyTo128bit_ = false;
+        } else {
+            NIXL_ERROR << "Invalid convert_key_to_128bit '" << it->second
                        << "', expected 'true' or 'false'";
             return NIXL_ERR_INVALID_PARAM;
         }
@@ -343,7 +358,8 @@ nixlDocaMemosEngine::nixlDocaMemosEngine(const nixlBackendInitParams *init_param
     NIXL_INFO << "Initializing DOCA KV with device_name=" << deviceName_
               << ", num_tasks=" << numTasks_ << ", nguid=" << nguid_
               << ", query_mem_mode=" << (queryMemAssumeSuccess_ ? "assume_success" : "actual")
-              << ", ignore_read_not_found=" << (ignoreReadNotFound_ ? "true" : "false");
+              << ", ignore_read_not_found=" << (ignoreReadNotFound_ ? "true" : "false")
+              << ", convert_key_to_128bit=" << (convertKeyTo128bit_ ? "true" : "false");
 
     if (initDocaDevice() != NIXL_SUCCESS) {
         initErr = true;
@@ -394,17 +410,48 @@ nixlDocaMemosEngine::convertToMemosKey(const std::string &meta_info, docaMemosKe
     return true;
 }
 
+bool
+nixlDocaMemosEngine::convertStringToBlake2Key(const std::string &meta_info, docaMemosKey &key) {
+    if (meta_info.empty()) {
+        return false;
+    }
+
+    docaMemosKey converted;
+    int result = blake2b(converted.key,
+                         meta_info.data(),
+                         nullptr,
+                         DOCA_MEMOS_MAX_OBJECT_KEY_LEN,
+                         meta_info.size(),
+                         0);
+    if (result != 0) {
+        return false;
+    }
+
+    converted.keyLen = DOCA_MEMOS_MAX_OBJECT_KEY_LEN;
+    key = converted;
+    return true;
+}
+
 // Resolves meta_info to a device key via one of three paths. The hex-first /
 // raw-fallback behaviour means the same meta_info string may take different
 // paths depending on its contents, so log the chosen path at DEBUG level.
 bool
 nixlDocaMemosEngine::resolveMemosKey(uint64_t dev_id,
                                      const std::string &meta_info,
-                                     docaMemosKey &key) {
+                                     docaMemosKey &key,
+                                     bool convert_key_to_128bit) {
     if (meta_info.empty()) {
         key.keyLen = sizeof(dev_id);
         memcpy(key.key, &dev_id, key.keyLen);
         NIXL_DEBUG << "resolveMemosKey: empty meta_info, using dev_id bytes";
+        return true;
+    }
+    if (convert_key_to_128bit) {
+        if (!convertStringToBlake2Key(meta_info, key)) {
+            NIXL_ERROR << "resolveMemosKey: failed to convert meta_info to Blake2b-128 key";
+            return false;
+        }
+        NIXL_DEBUG << "resolveMemosKey: converted meta_info to Blake2b-128 key";
         return true;
     }
     if (convertToMemosKey(meta_info, key)) {
@@ -431,7 +478,7 @@ nixlDocaMemosEngine::registerMem(const nixlBlobDesc &mem,
 
     if (nixl_mem == OBJ_SEG) {
         docaMemosKey key;
-        if (!resolveMemosKey(mem.devId, mem.metaInfo, key)) {
+        if (!resolveMemosKey(mem.devId, mem.metaInfo, key, convertKeyTo128bit_)) {
             NIXL_ERROR << "Failed to convert metaInfo to docaMemosKey: " << mem.metaInfo;
             return NIXL_ERR_INVALID_PARAM;
         }
@@ -469,7 +516,7 @@ nixlDocaMemosEngine::queryMem(const nixl_reg_dlist_t &descs,
         return NIXL_SUCCESS;
     }
 
-    return progressEngine_->queryMem(descs, resp);
+    return progressEngine_->queryMem(descs, resp, convertKeyTo128bit_);
 }
 
 nixl_status_t

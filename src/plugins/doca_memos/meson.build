@@ -16,7 +16,8 @@
 # Backend source list, exported so the unit-test executable
 # (test/unit/plugins/doca_memos) can build the same translation units against
 # the DOCA mocks. Defined unconditionally; everything below is gated on the
-# DOCA dependencies being available, but the test only needs the file list.
+# DOCA_MEMOS runtime/link dependencies being available, but the test only needs
+# the file list.
 doca_memos_backend_sources = files(
     'doca_memos_backend.cpp',
     'doca_memos_backend.h',
@@ -29,27 +30,29 @@ doca_memos_sources = [
     files('doca_memos_plugin.cpp'),
 ]
 
-if not (doca_kv_dep.found() and doca_common_dep.found())
+if not (doca_kv_dep.found() and doca_common_dep.found() and libb2_dep.found())
     if is_explicit_enable
         if not doca_kv_dep.found()
             error('DOCA_MEMOS plugin requested but doca-kv dependency not found')
-        else
+        elif not doca_common_dep.found()
             error('DOCA_MEMOS plugin requested but doca-common dependency not found')
+        else
+            error('DOCA_MEMOS plugin requested but libb2 dependency not found')
         endif
     endif
     subdir_done()
 endif
 
-doca_plugin_deps = plugin_deps + [doca_kv_dep, doca_common_dep]
+doca_plugin_deps = [nixl_infra, nixl_common_dep, thread_dep, doca_kv_dep, doca_common_dep, libb2_dep]
 
-doca_memos_cpp_args = compile_defs + ['-DDOCA_ALLOW_EXPERIMENTAL_API']
+doca_memos_cpp_args = ['-DDOCA_ALLOW_EXPERIMENTAL_API']
 
 if 'DOCA_MEMOS' in static_plugins
     doca_memos_backend_lib = static_library(
         'DOCA_MEMOS',
         doca_memos_sources,
         dependencies: doca_plugin_deps,
-        cpp_args: doca_memos_cpp_args + compile_flags,
+        cpp_args: doca_memos_cpp_args,
         include_directories: [nixl_inc_dirs, utils_inc_dirs],
         install: false,
         name_prefix: 'libplugin_')  # Custom prefix for plugin libraries

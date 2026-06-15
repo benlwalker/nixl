@@ -31,6 +31,7 @@ The DOCA_MEMOS plugin enables high-performance key-value operations (store, retr
   - `libdoca_kv` - DOCA Key-Value library
   - `libdoca_common` - DOCA Core library
   - `libdoca_nvme_kernel_kvdev` - DOCA NVMe kernel device support
+  - `libb2` - Blake2 hashing used by optional string-to-128-bit key conversion
 
 ## Configuration
 
@@ -48,6 +49,7 @@ The DOCA_MEMOS plugin enables high-performance key-value operations (store, retr
 | `nguid` | 32-character hex NVMe namespace NGUID passed to `doca_kvdev_set_nguid()` | all zeros |
 | `query_mem_mode` | Controls `queryMem()` behavior: `assume_success` returns success for every descriptor without querying the device; `actual` issues real DOCA EXIST operations | `assume_success` |
 | `ignore_read_not_found` | When `true`, retrieve operations on missing keys complete successfully (buffer contents are undefined) instead of failing with `NIXL_ERR_BACKEND` | `false` |
+| `convert_key_to_128bit` | When `true`, non-empty `OBJ_SEG` `metaInfo` strings are converted to a 16-byte unkeyed Blake2b digest instead of using the default hex/raw parser | `false` |
 
 ### Example Configuration
 
@@ -62,15 +64,32 @@ nixl_b_params_t params = {
 agent.createBackend("DOCA_MEMOS", params);
 ```
 
+For application keys longer than 16 bytes, enable string-to-128-bit conversion:
+
+```cpp
+nixl_b_params_t params = {
+    {"device_name", "/dev/nvme0n1"},
+    {"convert_key_to_128bit", "true"}
+};
+agent.createBackend("DOCA_MEMOS", params);
+
+nixlBlobDesc remote_desc;
+remote_desc.devId = 0;  // Ignored because metaInfo is non-empty
+remote_desc.metaInfo = "tenant-a/model-7/checkpoints/step-000123";
+agent.registerMem(remote_desc, OBJ_SEG);
+```
+
 ## Supported Operations
 
 ### Memory Registration
 
 - **DRAM_SEG**: Local system memory buffers for data transfer
 - **OBJ_SEG**: Key-value pairs stored on the NVMe KV device
-  - If `metaInfo` is a valid hex string of up to `2 * DOCA_MEMOS_MAX_OBJECT_KEY_LEN` (32) characters, it is decoded into the object key
-  - Otherwise, if `metaInfo` is non-empty and at most `DOCA_MEMOS_MAX_OBJECT_KEY_LEN` (16) bytes, it is used as the raw key
-  - If `metaInfo` is empty, the raw bytes of `devId` (`sizeof(uint64_t)`) are used as the key
+  - If `metaInfo` is empty, the raw bytes of `devId` (`sizeof(uint64_t)`) are used as the key. `devId == 0` is a valid key.
+  - In default mode (`convert_key_to_128bit` omitted or `false`), a valid hex string of up to `2 * DOCA_MEMOS_MAX_OBJECT_KEY_LEN` (32) characters is decoded into the object key.
+  - In default mode, a non-hex `metaInfo` string of up to `DOCA_MEMOS_MAX_OBJECT_KEY_LEN` (16) bytes is used as raw key bytes.
+  - In default mode, a longer non-hex `metaInfo` string is rejected.
+  - In hash mode (`convert_key_to_128bit=true`), every non-empty `metaInfo` string is hashed as the exact byte string supplied by the caller. The plugin uses unkeyed Blake2b via libb2 with a 16-byte digest. Strings that look like hex are hashed, not decoded.
 
 ### Transfer Operations
 
@@ -178,8 +197,9 @@ nixl_agent agent("kv_agent", config);
 nixl_b_params_t params = {{"device_name", "/dev/nvme0n1"}};
 agent.createBackend("DOCA_MEMOS", params);
 
-// Register OBJ_SEG memory with a key (metaInfo must be <= 16 raw bytes or
-// a hex string of <= 32 chars; see "Memory Registration" above)
+// Register OBJ_SEG memory with a default-mode key. Use a <= 16 byte raw
+// string, a <= 32 character hex string, or enable convert_key_to_128bit for
+// longer application strings.
 nixlBlobDesc remote_desc;
 remote_desc.devId = 100;
 remote_desc.metaInfo = "ckpt_0001";
@@ -253,8 +273,10 @@ The `num_tasks` parameter controls the DOCA task pool size:
 
 ### Key Naming
 
-- Keys are at most 16 bytes (`DOCA_MEMOS_MAX_OBJECT_KEY_LEN`)
-- Pass hex strings for explicit binary keys, or short ASCII strings to use the raw-bytes path
+- DOCA object keys are at most 16 bytes (`DOCA_MEMOS_MAX_OBJECT_KEY_LEN`).
+- Leave `metaInfo` empty to use raw `devId` bytes. This is useful when the caller already has a numeric object identifier.
+- In default mode, pass hex strings for explicit binary keys or short strings to use the raw-bytes path.
+- Use `convert_key_to_128bit=true` when application object names may exceed 16 bytes or when all string keys should map to fixed-width 128-bit keys.
 
 ## Limitations
 

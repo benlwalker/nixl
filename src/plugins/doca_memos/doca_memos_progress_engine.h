@@ -79,7 +79,9 @@ public:
     virtual void
     cancelRequest(nixlDocaMemosBackendReqH *req_h) const = 0;
     virtual nixl_status_t
-    queryMem(const nixl_reg_dlist_t &descs, std::vector<nixl_query_resp_t> &resp) const = 0;
+    queryMem(const nixl_reg_dlist_t &descs,
+             std::vector<nixl_query_resp_t> &resp,
+             bool convert_key_to_128bit) const = 0;
 
 protected:
     nixlDocaMemosProgressEngine(struct doca_nvme_kernel_kvdev *nvme_kvdev, uint32_t num_tasks);
@@ -94,7 +96,8 @@ protected:
     trySubmitExistTask(nixlDocaMemosBackendReqH *req_h) const;
     void
     prepareQueryHandles(const nixl_reg_dlist_t &descs,
-                        std::vector<nixlDocaMemosBackendReqH> &query_handles) const;
+                        std::vector<nixlDocaMemosBackendReqH> &query_handles,
+                        bool convert_key_to_128bit) const;
     void
     waitForQueryCompletion(const std::vector<nixlDocaMemosBackendReqH> &query_handles,
                            const std::function<void()> &poll) const;
@@ -145,7 +148,9 @@ public:
     nixl_status_t
     checkXfer(nixlDocaMemosBackendReqH *req_h) const override;
     nixl_status_t
-    queryMem(const nixl_reg_dlist_t &descs, std::vector<nixl_query_resp_t> &resp) const override;
+    queryMem(const nixl_reg_dlist_t &descs,
+             std::vector<nixl_query_resp_t> &resp,
+             bool convert_key_to_128bit) const override;
 
 private:
     int
@@ -186,7 +191,9 @@ public:
     void
     cancelRequest(nixlDocaMemosBackendReqH *req_h) const override;
     nixl_status_t
-    queryMem(const nixl_reg_dlist_t &descs, std::vector<nixl_query_resp_t> &resp) const override;
+    queryMem(const nixl_reg_dlist_t &descs,
+             std::vector<nixl_query_resp_t> &resp,
+             bool convert_key_to_128bit) const override;
 
 private:
     struct pendingEntry {

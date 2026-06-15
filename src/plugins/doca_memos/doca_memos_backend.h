@@ -221,7 +221,12 @@ public:
     static bool
     convertToMemosKey(const std::string &meta_info, docaMemosKey &key);
     static bool
-    resolveMemosKey(uint64_t dev_id, const std::string &meta_info, docaMemosKey &key);
+    convertStringToBlake2Key(const std::string &meta_info, docaMemosKey &key);
+    static bool
+    resolveMemosKey(uint64_t dev_id,
+                    const std::string &meta_info,
+                    docaMemosKey &key,
+                    bool convert_key_to_128bit = false);
 
 private:
     struct doca_kvdev *kvdev_ = nullptr;
@@ -236,6 +241,7 @@ private:
     std::string nguid_ = kDefaultNguid;
     bool queryMemAssumeSuccess_ = true;
     bool ignoreReadNotFound_ = false;
+    bool convertKeyTo128bit_ = false;
 
     nixl_status_t
     parseInitParams(const nixl_b_params_t *params);
