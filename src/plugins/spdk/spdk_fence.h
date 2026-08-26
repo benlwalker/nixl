@@ -43,10 +43,6 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 /** A quarantined staging buffer awaiting release after the fencing teardown. */
 struct spdk_quarantine_node {
 	void				*buf;
@@ -139,9 +135,5 @@ int spdk_fence_quarantine(struct spdk_fence *f, void *buf);
  * hardware trackers dead, so no completion can reference a freed buffer.
  */
 void spdk_fence_drain(struct spdk_fence *f, void (*free_buf)(void *));
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif /* SPDK_FENCE_H */

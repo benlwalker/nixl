@@ -98,7 +98,7 @@ spdk_fence_quarantine(struct spdk_fence *f, void *buf)
 	if (buf == NULL) {
 		return 0;
 	}
-	n = calloc(1, sizeof(*n));
+	n = static_cast<struct spdk_quarantine_node *>(calloc(1, sizeof(*n)));
 	if (n == NULL) {
 		return -ENOMEM;
 	}

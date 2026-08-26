@@ -118,7 +118,7 @@ static void
 attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 	  struct spdk_nvme_ctrlr *ctrlr, const struct spdk_nvme_ctrlr_opts *opts)
 {
-	struct spdk_shim *sh = cb_ctx;
+	struct spdk_shim *sh = static_cast<struct spdk_shim *>(cb_ctx);
 
 	sh->ctrlr = ctrlr;
 }
@@ -132,7 +132,8 @@ io_complete(void *arg, const struct spdk_nvme_cpl *cpl)
 	 * poller is waiting for, so a late orphan from a timed-out op cannot be
 	 * mis-recorded as the current op's status.
 	 */
-	spdk_fence_complete(arg, cpl->status.sct, cpl->status.sc, cpl->cdw0);
+	spdk_fence_complete(static_cast<struct spdk_op_tag *>(arg), cpl->status.sct,
+			    cpl->status.sc, cpl->cdw0);
 }
 
 /*
@@ -203,7 +204,7 @@ spdk_shim_open(const struct spdk_shim_opts *opts, struct spdk_shim **out)
 		return -EINVAL;
 	}
 
-	sh = calloc(1, sizeof(*sh));
+	sh = static_cast<struct spdk_shim *>(calloc(1, sizeof(*sh)));
 	if (sh == NULL) {
 		return -ENOMEM;
 	}
@@ -816,7 +817,7 @@ kv_xfer_sgl(struct spdk_shim *sh, uint8_t opc, const void *key, uint8_t key_len,
 		memcpy((uint8_t *)&cmd.cdw14, (const uint8_t *)key + 8, (size_t)(key_len - 8));
 	}
 
-	sh->sgl_base = value;
+	sh->sgl_base = static_cast<const uint8_t *>(value);
 	sh->sgl_total = value_len;
 	sh->sgl_off = 0;
 
@@ -986,7 +987,7 @@ blk_rw(struct spdk_shim *sh, bool is_write, void *buf, uint64_t lba,
 		return -EFBIG;
 	}
 
-	sh->sgl_base = buf;
+	sh->sgl_base = static_cast<const uint8_t *>(buf);
 	sh->sgl_total = byte_len;
 	sh->sgl_off = 0;
 

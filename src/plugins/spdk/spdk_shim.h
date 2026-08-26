@@ -35,9 +35,6 @@
  * carries NO backend-specific behavior, NO KV Exec, and NO long-key
  * handling. Delete/List and VRAM/P2PDMA are deliberately left for later.
  *
- * This header is a plain C ABI (wrapped in extern "C") so the C++ NIXL backend
- * TU can link it while keeping the C-only SPDK headers isolated in the C TU.
- *
  * Return convention for the op functions (store/retrieve/exist):
  *   -  0 on SUCCESS (NVMe status code 0x00).
  *   -  a POSITIVE NVMe status code (sc) for a device-reported logical status
@@ -57,10 +54,6 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
-
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 /*
  * NVMe generic status codes surfaced verbatim through the op return convention,
@@ -412,9 +405,5 @@ int spdk_shim_write(struct spdk_shim *sh, const void *buf, uint64_t lba,
  */
 int spdk_shim_read(struct spdk_shim *sh, void *buf, uint64_t lba,
 		      uint32_t lba_count);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif /* SPDK_SHIM_H */

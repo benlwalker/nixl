@@ -25,9 +25,7 @@
 
 #include "common/nixl_log.h"
 
-extern "C" {
 #include "spdk_shim.h"
-}
 
 namespace {
 

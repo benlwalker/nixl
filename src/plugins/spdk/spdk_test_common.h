@@ -49,9 +49,7 @@
 #include "backend/backend_aux.h"
 #include "spdk_backend.h"
 
-extern "C" {
 #include "spdk_shim.h" // SPDK_SHIM_MAX_VALUE_LEN, dma_alloc/free, ...
-}
 
 namespace spdk_test {
 
