@@ -29,10 +29,6 @@ void
 spdk_fence_init(struct spdk_fence *f)
 {
 	f->gen = 0;
-	f->op_done = false;
-	f->op_sct = 0;
-	f->op_sc = 0;
-	f->op_cdw0 = 0;
 	f->poisoned = false;
 	f->quarantine = NULL;
 }
@@ -43,14 +39,14 @@ spdk_fence_begin(struct spdk_fence *f, struct spdk_op_tag *tag)
 	if (f->poisoned) {
 		return false;
 	}
-	/*
-	 * A fresh generation per op is the token io_complete() compares: a late
-	 * completion carrying a previous generation is discarded by complete().
-	 */
 	f->gen++;
-	f->op_done = false;
 	tag->fence = f;
 	tag->gen = f->gen;
+	tag->op_done = false;
+	tag->op_sct = 0;
+	tag->op_sc = 0;
+	tag->op_cdw0 = 0;
+	tag->abandoned = false;
 	return true;
 }
 
@@ -58,24 +54,28 @@ bool
 spdk_fence_complete(struct spdk_op_tag *tag, uint8_t sct, uint8_t sc,
 		       uint32_t cdw0)
 {
-	struct spdk_fence *f = tag->fence;
-
-	if (tag->gen != f->gen) {
-		/* Stale orphan from a previously abandoned op: leave the current
-		 * op's slot untouched so it reports its OWN status, not this one. */
+	if (tag->abandoned) {
+		/* Stale orphan from an op the submitter already gave up on. Discard
+		 * it; the tag stays allocated until drain() so this write is safe. */
 		return false;
 	}
-	f->op_sct = sct;
-	f->op_sc = sc;
-	f->op_cdw0 = cdw0;
-	f->op_done = true;
+	tag->op_sct = sct;
+	tag->op_sc = sc;
+	tag->op_cdw0 = cdw0;
+	tag->op_done = true;
 	return true;
 }
 
 bool
-spdk_fence_done(const struct spdk_fence *f)
+spdk_fence_done(const struct spdk_op_tag *tag)
 {
-	return f->op_done;
+	return tag->op_done;
+}
+
+void
+spdk_fence_abandon(struct spdk_op_tag *tag)
+{
+	tag->abandoned = true;
 }
 
 void

@@ -38,7 +38,7 @@
 
 /*
  * Per-op completion budget. Bounds how long an in-flight KV command may run
- * before poll_to_completion() gives up with -ETIMEDOUT so a dead/wedged target
+ * before spdk_shim_poll() expires it with -ETIMEDOUT so a dead/wedged target
  * cannot hang the datapath forever. A healthy in-memory or vfio-user KV op is
  * sub-millisecond; 20s is generous headroom for a slow round-trip while still
  * bounding a dead target to seconds.
@@ -75,36 +75,26 @@ struct spdk_shim {
 	/* Whether this shim owns the SPDK env (called spdk_env_init). */
 	bool			owns_env;
 	/*
-	 * Single in-flight op completion + fence state. Ops are strictly
-	 * synchronous (submit, then poll to completion before returning), and the
-	 * shim uses one qpair from one thread, so at most one op is outstanding at
-	 * a time. The completion callback records into the fence's slot and the
-	 * submitting op reads it back after the poll.
+	 * Device-level fence state (see spdk_fence.h). Each op carries its own
+	 * completion slot and SGL iterator, so concurrent ops never share one; what
+	 * lives here is the poison latch and the quarantine.
 	 *
-	 * Timeout / transport-failure hardening (see spdk_fence.h): if an op
-	 * times out or the qpair transport-fails, the outstanding hardware tracker
-	 * is NOT aborted (vfio-user does not abort trackers on disconnect), so a
-	 * late "orphan" completion could otherwise fire later and be mis-recorded,
-	 * and the target could DMA into a freed staging buffer. The fence closes
-	 * both windows: begin() stamps each op with a generation the completion
-	 * checks (stale orphans are discarded), a timeout/-ENXIO latches the fence
-	 * POISONED so no later op is submitted under the live tracker, and the
-	 * staging buffer of a poisoned op is quarantined rather than freed until
-	 * the fencing teardown in spdk_shim_close() proves the tracker dead.
-	 * op_tag is this shim's single per-op completion cb_arg (safe to embed and
-	 * reuse precisely because a poisoned fence refuses any reuse-while-live).
+	 * Timeout / transport-failure hardening: an op that times out or whose qpair
+	 * transport-fails leaves its hardware tracker NOT aborted (vfio-user does
+	 * not abort trackers on disconnect), so a late "orphan" completion could
+	 * fire afterwards and the target could DMA into a freed staging buffer. The
+	 * fence closes both windows: an abandoned op's tag discards the orphan, a
+	 * timeout/-ENXIO latches POISONED so no later op is submitted under a live
+	 * tracker, and the abandoned op's staging buffer is quarantined rather than
+	 * freed until the fencing teardown in spdk_shim_close() proves it dead.
 	 */
 	struct spdk_fence	fence;
-	struct spdk_op_tag	op_tag;
 	/*
-	 * Region-bounded SGL iterator state for the in-flight op. lib/nvme drives
-	 * kv_reset_sgl()/kv_next_sge() (below) with this shim as the callback arg to
-	 * walk the value buffer one 2 MiB-region-bounded segment at a time. Single
-	 * in-flight op, single qpair, single thread — so one iterator suffices.
+	 * Ops submitted and not yet reaped, newest first. Walked by
+	 * spdk_shim_poll() to expire ops past their deadline, and drained at close
+	 * so an abandoned op's staging buffer reaches the quarantine.
 	 */
-	const uint8_t		*sgl_base;
-	uint32_t		sgl_total;
-	uint32_t		sgl_off;
+	struct spdk_shim_op	*inflight;
 };
 
 static bool
@@ -132,53 +122,176 @@ io_complete(void *arg, const struct spdk_nvme_cpl *cpl)
 	 * poller is waiting for, so a late orphan from a timed-out op cannot be
 	 * mis-recorded as the current op's status.
 	 */
-	spdk_fence_complete(static_cast<struct spdk_op_tag *>(arg), cpl->status.sct,
+	spdk_fence_complete(&static_cast<struct spdk_shim_op *>(arg)->tag, cpl->status.sct,
 			    cpl->status.sc, cpl->cdw0);
 }
 
-/*
- * Poll the qpair until the in-flight command completes, the qpair fails at the
- * transport layer (-ENXIO), or the per-op timeout expires (-ETIMEDOUT).
- * Returns 0 on completion (caller reads status_to_rc()).
- *
- * A non-zero return means the op did NOT complete and its hardware tracker may
- * still be live; latch the fence POISONED so no later op is submitted (and no
- * staging buffer is freed) under that live tracker until a fencing teardown.
- */
-static int
-poll_to_completion(struct spdk_shim *sh)
+/* In-flight list helpers. Single-threaded per shim, so no locking here. */
+static void
+inflight_push(struct spdk_shim *sh, struct spdk_shim_op *op)
 {
-	uint64_t deadline = spdk_get_ticks() +
-			    (uint64_t)SPDK_SHIM_OP_TIMEOUT_S * spdk_get_ticks_hz();
+	op->next = sh->inflight;
+	sh->inflight = op;
+	op->submitted = true;
+}
 
-	while (!spdk_fence_done(&sh->fence)) {
-		int32_t n = spdk_nvme_qpair_process_completions(sh->qpair, 0);
+static void
+inflight_remove(struct spdk_shim *sh, struct spdk_shim_op *op)
+{
+	struct spdk_shim_op **pp = &sh->inflight;
 
-		if (n < 0) {
-			spdk_fence_poison(&sh->fence);
-			return n;
+	while (*pp != NULL) {
+		if (*pp == op) {
+			*pp = op->next;
+			break;
 		}
-		if (!spdk_fence_done(&sh->fence) && spdk_get_ticks() >= deadline) {
-			spdk_fence_poison(&sh->fence);
-			return -ETIMEDOUT;
-		}
+		pp = &(*pp)->next;
 	}
-	return 0;
+	op->next = NULL;
+	op->submitted = false;
 }
 
 /*
- * Translate the captured completion into the public return convention:
+ * Give up on an op whose tracker may still be live: discard any completion that
+ * arrives later, and latch the shim poisoned so nothing new is submitted under
+ * it. The op stays on the in-flight list until the caller reaps it, and its
+ * staging buffer is quarantined rather than freed.
+ */
+static void
+expire_op(struct spdk_shim *sh, struct spdk_shim_op *op)
+{
+	spdk_fence_abandon(&op->tag);
+	spdk_fence_poison(&sh->fence);
+	op->expired = true;
+}
+
+void
+spdk_shim_op_init(struct spdk_shim_op *op)
+{
+	if (op == NULL) {
+		return;
+	}
+	memset(op, 0, sizeof(*op));
+}
+
+bool
+spdk_shim_op_done(const struct spdk_shim_op *op)
+{
+	return op != NULL && (op->expired || spdk_fence_done(&op->tag));
+}
+
+int
+spdk_shim_poll(struct spdk_shim *sh, uint32_t max)
+{
+	struct spdk_shim_op *op;
+	uint64_t now;
+	int32_t n;
+
+	if (sh == NULL) {
+		return -EINVAL;
+	}
+	if (sh->inflight == NULL) {
+		return 0;
+	}
+
+	n = spdk_nvme_qpair_process_completions(sh->qpair, max);
+	if (n < 0) {
+		/*
+		 * The qpair failed at the transport level. Every outstanding tracker
+		 * is now unaccounted for, so abandon all of them rather than waiting
+		 * for each to hit its deadline separately.
+		 */
+		for (op = sh->inflight; op != NULL; op = op->next) {
+			if (!spdk_fence_done(&op->tag)) {
+				expire_op(sh, op);
+			}
+		}
+		return n;
+	}
+
+	now = spdk_get_ticks();
+	for (op = sh->inflight; op != NULL; op = op->next) {
+		if (!spdk_fence_done(&op->tag) && !op->expired && now >= op->deadline) {
+			expire_op(sh, op);
+		}
+	}
+	return n;
+}
+
+/*
+ * Translate a reaped op into the public return convention:
  *   0        -> SUCCESS
  *   positive -> device-reported NVMe status code (sct == GENERIC)
  *   negative -> transport/other error (negated errno)
  */
 static int
-status_to_rc(struct spdk_shim *sh)
+op_status_to_rc(const struct spdk_shim_op *op)
 {
-	if (sh->fence.op_sct != SPDK_NVME_SCT_GENERIC) {
+	if (op->tag.op_sct != SPDK_NVME_SCT_GENERIC) {
 		return -EIO;
 	}
-	return (int)sh->fence.op_sc;
+	return (int)op->tag.op_sc;
+}
+
+int
+spdk_shim_op_result(struct spdk_shim *sh, struct spdk_shim_op *op,
+		       uint32_t *value_len_out)
+{
+	uint32_t cdw0;
+	int rc;
+
+	if (sh == NULL || op == NULL || !spdk_shim_op_done(op)) {
+		return -EINVAL;
+	}
+
+	inflight_remove(sh, op);
+
+	if (op->expired) {
+		return -ETIMEDOUT;
+	}
+
+	cdw0 = op->tag.op_cdw0;
+	rc = op_status_to_rc(op);
+
+	/*
+	 * Value auto-sizing for Retrieve. cdw0 is the device's TRUE stored value
+	 * length on the value-bearing completions. A short host buffer is signalled
+	 * two ways and we NORMALIZE both to BUFFER_TOO_SMALL (0x85) so the caller
+	 * has one contract:
+	 *   (a) SUCCESS with cdw0 > buf_len: the device transferred the leading
+	 *       buf_len bytes and reports the full length; or
+	 *   (b) 0x85 directly, with cdw0 the true length.
+	 * On any other return *value_len_out is left untouched.
+	 */
+	if (op->is_retrieve) {
+		if (rc == 0) {
+			if (value_len_out != NULL) {
+				*value_len_out = cdw0;
+			}
+			if (cdw0 > op->sgl_total) {
+				rc = SPDK_NVME_SC_INVALID_VALUE_SIZE;
+			}
+		} else if (rc == SPDK_NVME_SC_INVALID_VALUE_SIZE && value_len_out != NULL) {
+			*value_len_out = cdw0;
+		}
+	}
+
+	return rc;
+}
+
+void
+spdk_shim_op_release(struct spdk_shim *sh, struct spdk_shim_op *op)
+{
+	if (op == NULL || op->staging == NULL) {
+		return;
+	}
+	/*
+	 * spdk_shim_release_io_buf() frees on the healthy path and quarantines when
+	 * the shim is poisoned, which is exactly the abandoned-op case: the tracker
+	 * may still DMA into this buffer, so it must not go back to the heap.
+	 */
+	spdk_shim_release_io_buf(sh, op->staging);
+	op->staging = NULL;
 }
 
 int
@@ -396,6 +509,24 @@ spdk_shim_close(struct spdk_shim *sh)
 	if (sh == NULL) {
 		return;
 	}
+	/*
+	 * Anything still in flight is being abandoned by the close itself. Route
+	 * each op's staging buffer to the quarantine before the qpair goes away, so
+	 * the drain below frees them exactly once.
+	 */
+	while (sh->inflight != NULL) {
+		struct spdk_shim_op *op = sh->inflight;
+
+		sh->inflight = op->next;
+		op->next = NULL;
+		op->submitted = false;
+		spdk_fence_abandon(&op->tag);
+		if (op->staging != NULL) {
+			(void)spdk_fence_quarantine(&sh->fence, op->staging);
+			op->staging = NULL;
+		}
+	}
+
 	if (sh->qpair != NULL) {
 		/*
 		 * Tear the qpair down FIRST: freeing it reclaims the hardware
@@ -717,13 +848,10 @@ kv_region_count(const void *base, uint32_t len)
 static void
 kv_reset_sgl(void *cb_arg, uint32_t offset)
 {
-	/*
-	 * cb_arg is the op's fence tag (&sh->op_tag), shared with io_complete; the
-	 * SGL iterator lives in the enclosing shim, so recover it from the tag.
-	 */
-	struct spdk_shim *sh = SPDK_CONTAINEROF(cb_arg, struct spdk_shim, op_tag);
+	/* cb_arg is the op, the same pointer io_complete() gets. */
+	struct spdk_shim_op *op = static_cast<struct spdk_shim_op *>(cb_arg);
 
-	sh->sgl_off = offset;
+	op->sgl_off = offset;
 }
 
 /*
@@ -735,17 +863,16 @@ kv_reset_sgl(void *cb_arg, uint32_t offset)
 static int
 kv_next_sge(void *cb_arg, void **address, uint32_t *length)
 {
-	/* cb_arg is &sh->op_tag (shared with io_complete); recover the shim. */
-	struct spdk_shim *sh = SPDK_CONTAINEROF(cb_arg, struct spdk_shim, op_tag);
-	uint64_t addr = (uint64_t)(uintptr_t)sh->sgl_base + sh->sgl_off;
-	uint32_t remaining = sh->sgl_total - sh->sgl_off;
+	struct spdk_shim_op *op = static_cast<struct spdk_shim_op *>(cb_arg);
+	uint64_t addr = (uint64_t)(uintptr_t)op->sgl_base + op->sgl_off;
+	uint32_t remaining = op->sgl_total - op->sgl_off;
 	uint32_t to_boundary =
 		(uint32_t)(SPDK_SHIM_DMA_REGION - (addr & (SPDK_SHIM_DMA_REGION - 1)));
 	uint32_t seg = remaining < to_boundary ? remaining : to_boundary;
 
 	*address = (void *)(uintptr_t)addr;
 	*length = seg;
-	sh->sgl_off += seg;
+	op->sgl_off += seg;
 	return 0;
 }
 
@@ -756,19 +883,20 @@ kv_next_sge(void *cb_arg, void **address, uint32_t *length)
  * single op as one data-block descriptor per 2 MiB region. A value that would
  * exceed the region budget is REJECTED here (-EFBIG), never striped.
  *
- * On SUCCESS \c *cdw0_out (when non-NULL) receives the completion cdw0, which
- * for Retrieve is the device's TRUE stored value length.
+ * Returns once the command is on the qpair; the caller reaps it with
+ * spdk_shim_poll() and reads the result with spdk_shim_op_result().
  */
 static int
-kv_xfer_sgl(struct spdk_shim *sh, uint8_t opc, const void *key, uint8_t key_len,
-	    void *value, uint32_t value_len, uint32_t *cdw0_out)
+kv_xfer_sgl(struct spdk_shim *sh, struct spdk_shim_op *op, uint8_t opc,
+	    const void *key, uint8_t key_len, void *value, uint32_t value_len)
 {
 	struct spdk_nvme_cmd cmd;
 	int rc;
 
-	if (sh == NULL || key == NULL || value == NULL || value_len == 0) {
+	if (sh == NULL || op == NULL || key == NULL || value == NULL || value_len == 0) {
 		return -EINVAL;
 	}
+	op->is_retrieve = (opc == SPDK_NVME_OPC_KV_RETRIEVE);
 	/*
 	 * Mode guard (mirrors blk_rw's !is_block reject): the KV op-set must never
 	 * run on a block-bound shim. SPDK_NVME_OPC_KV_STORE (0x01) and
@@ -817,91 +945,50 @@ kv_xfer_sgl(struct spdk_shim *sh, uint8_t opc, const void *key, uint8_t key_len,
 		memcpy((uint8_t *)&cmd.cdw14, (const uint8_t *)key + 8, (size_t)(key_len - 8));
 	}
 
-	sh->sgl_base = static_cast<const uint8_t *>(value);
-	sh->sgl_total = value_len;
-	sh->sgl_off = 0;
+	op->sgl_base = static_cast<const uint8_t *>(value);
+	op->sgl_total = value_len;
+	op->sgl_off = 0;
 
 	/* Refuse to submit onto a poisoned (timed-out / fenced) qpair. */
-	if (!spdk_fence_begin(&sh->fence, &sh->op_tag)) {
+	if (!spdk_fence_begin(&sh->fence, &op->tag)) {
 		return -ESHUTDOWN;
 	}
 	rc = spdk_nvme_ctrlr_cmd_iov_raw_with_md(sh->ctrlr, sh->qpair, &cmd, value_len,
-						 NULL, io_complete, &sh->op_tag,
+						 NULL, io_complete, op,
 						 kv_reset_sgl, kv_next_sge);
 	if (rc != 0) {
 		return rc < 0 ? rc : -rc;
 	}
-	rc = poll_to_completion(sh);
-	if (rc != 0) {
-		return rc;
-	}
-	rc = status_to_rc(sh);
-	/*
-	 * The op completed; cdw0 carries the device's reported value length (the
-	 * TRUE stored length for Retrieve, even when it exceeds the host buffer).
-	 * Hand it back unconditionally so the Retrieve wrapper can drive value
-	 * auto-sizing off the 0x00-with-cdw0>buf_len and direct-0x85 cases alike.
-	 * Store passes cdw0_out == NULL and ignores it.
-	 */
-	if (cdw0_out != NULL) {
-		*cdw0_out = sh->fence.op_cdw0;
-	}
-	return rc;
+	op->deadline = spdk_get_ticks() +
+		       (uint64_t)SPDK_SHIM_OP_TIMEOUT_S * spdk_get_ticks_hz();
+	inflight_push(sh, op);
+	return 0;
+}
+int
+spdk_shim_store(struct spdk_shim *sh, struct spdk_shim_op *op, const void *key,
+		   uint8_t key_len, const void *value, uint32_t value_len)
+{
+	return kv_xfer_sgl(sh, op, SPDK_NVME_OPC_KV_STORE, key, key_len,
+			   (void *)(uintptr_t)value, value_len);
 }
 
 int
-spdk_shim_store(struct spdk_shim *sh, const void *key, uint8_t key_len,
-		   const void *value, uint32_t value_len)
+spdk_shim_retrieve(struct spdk_shim *sh, struct spdk_shim_op *op, const void *key,
+		      uint8_t key_len, void *value, uint32_t buf_len)
 {
-	return kv_xfer_sgl(sh, SPDK_NVME_OPC_KV_STORE, key, key_len,
-			   (void *)(uintptr_t)value, value_len, NULL);
+	return kv_xfer_sgl(sh, op, SPDK_NVME_OPC_KV_RETRIEVE, key, key_len,
+			   value, buf_len);
 }
 
-int
-spdk_shim_retrieve(struct spdk_shim *sh, const void *key, uint8_t key_len,
-		      void *value, uint32_t buf_len, uint32_t *value_len_out)
-{
-	uint32_t cdw0 = 0;
-	int rc = kv_xfer_sgl(sh, SPDK_NVME_OPC_KV_RETRIEVE, key, key_len,
-			     value, buf_len, &cdw0);
-
-	/*
-	 * Value auto-sizing layered over the region-bounded SGL datapath. cdw0 is
-	 * the device's TRUE stored value length on the
-	 * value-bearing completions. A short host buffer is signalled two ways, and
-	 * we NORMALIZE both to a single BUFFER_TOO_SMALL (0x85) return so the caller
-	 * has one contract:
-	 *   (a) SUCCESS (sc 0x00) with cdw0 > buf_len -- the device transferred the
-	 *       leading buf_len bytes and reports the full length; or
-	 *   (b) 0x85 INVALID_VALUE_SIZE directly with cdw0 = the true length.
-	 * In both cases the buffer holds at most buf_len bytes of a longer value, so
-	 * we surface 0x85 and hand back the true length via *value_len_out; the
-	 * caller resizes to it and re-Retrieves (which builds a larger, still
-	 * region-bounded SGL). On any other return (absent key 0x87, other device
-	 * sc, or a negated errno) *value_len_out is left untouched.
-	 */
-	if (rc == 0) {
-		if (value_len_out != NULL) {
-			*value_len_out = cdw0;
-		}
-		if (cdw0 > buf_len) {
-			/* (a) SUCCESS but the value did not fit the buffer. */
-			return SPDK_NVME_SC_INVALID_VALUE_SIZE;
-		}
-		return 0;
-	}
-	if (rc == SPDK_NVME_SC_INVALID_VALUE_SIZE) {
-		/* (b) device signalled too-small directly; cdw0 is the true length. */
-		if (value_len_out != NULL) {
-			*value_len_out = cdw0;
-		}
-	}
-	return rc;
-}
-
+/*
+ * Exist is the one synchronous op: NIXL's queryMem has no asynchronous
+ * contract, so this submits and polls inline against a local op rather than
+ * handing the caller something to reap. It transfers no data, so it is short.
+ */
 int
 spdk_shim_exist(struct spdk_shim *sh, const void *key, uint8_t key_len)
 {
+	struct spdk_shim_op op;
 	int rc;
 
 	if (sh == NULL) {
@@ -914,24 +1001,32 @@ spdk_shim_exist(struct spdk_shim *sh, const void *key, uint8_t key_len)
 	if (sh->is_block) {
 		return -EINVAL;
 	}
+	spdk_shim_op_init(&op);
 	/* Refuse to submit onto a poisoned (timed-out / fenced) qpair. */
-	if (!spdk_fence_begin(&sh->fence, &sh->op_tag)) {
+	if (!spdk_fence_begin(&sh->fence, &op.tag)) {
 		return -ESHUTDOWN;
 	}
-	rc = spdk_nvme_kv_exist(sh->ns, sh->qpair, key, key_len, io_complete, &sh->op_tag);
+	rc = spdk_nvme_kv_exist(sh->ns, sh->qpair, key, key_len, io_complete, &op);
 	if (rc != 0) {
 		return rc < 0 ? rc : -rc;
 	}
-	rc = poll_to_completion(sh);
-	if (rc != 0) {
-		return rc;
+	op.deadline = spdk_get_ticks() +
+		      (uint64_t)SPDK_SHIM_OP_TIMEOUT_S * spdk_get_ticks_hz();
+	inflight_push(sh, &op);
+
+	while (!spdk_shim_op_done(&op)) {
+		rc = spdk_shim_poll(sh, 0);
+		if (rc < 0) {
+			break;
+		}
 	}
 	/*
-	 * status_to_rc maps a GENERIC completion to its NVMe sc: 0x00 -> 0 (the
-	 * key exists / hit), 0x87 KEY_DOES_NOT_EXIST -> 0x87 (absent / miss). No
-	 * value data is transferred either way.
+	 * op_result maps a GENERIC completion to its NVMe sc: 0x00 -> 0 (the key
+	 * exists / hit), 0x87 KEY_DOES_NOT_EXIST -> 0x87 (absent / miss). No value
+	 * data is transferred either way. It also takes the op off the in-flight
+	 * list, which matters here because the op is on this stack frame.
 	 */
-	return status_to_rc(sh);
+	return spdk_shim_op_result(sh, &op, NULL);
 }
 
 /*
@@ -946,14 +1041,14 @@ spdk_shim_exist(struct spdk_shim *sh, const void *key, uint8_t key_len)
  * poll loop and completion capture as the KV ops.
  */
 static int
-blk_rw(struct spdk_shim *sh, bool is_write, void *buf, uint64_t lba,
-       uint32_t lba_count)
+blk_rw(struct spdk_shim *sh, struct spdk_shim_op *op, bool is_write, void *buf,
+       uint64_t lba, uint32_t lba_count)
 {
 	uint64_t total_bytes;
 	uint32_t byte_len;
 	int rc;
 
-	if (sh == NULL || buf == NULL || lba_count == 0) {
+	if (sh == NULL || op == NULL || buf == NULL || lba_count == 0) {
 		return -EINVAL;
 	}
 	if (!sh->is_block || sh->sector_size == 0) {
@@ -987,43 +1082,42 @@ blk_rw(struct spdk_shim *sh, bool is_write, void *buf, uint64_t lba,
 		return -EFBIG;
 	}
 
-	sh->sgl_base = static_cast<const uint8_t *>(buf);
-	sh->sgl_total = byte_len;
-	sh->sgl_off = 0;
+	op->sgl_base = static_cast<const uint8_t *>(buf);
+	op->sgl_total = byte_len;
+	op->sgl_off = 0;
 
 	/* Refuse to submit onto a poisoned (timed-out / fenced) qpair. */
-	if (!spdk_fence_begin(&sh->fence, &sh->op_tag)) {
+	if (!spdk_fence_begin(&sh->fence, &op->tag)) {
 		return -ESHUTDOWN;
 	}
 	if (is_write) {
 		rc = spdk_nvme_ns_cmd_writev(sh->ns, sh->qpair, lba, lba_count,
-					     io_complete, &sh->op_tag, 0,
+					     io_complete, op, 0,
 					     kv_reset_sgl, kv_next_sge);
 	} else {
 		rc = spdk_nvme_ns_cmd_readv(sh->ns, sh->qpair, lba, lba_count,
-					    io_complete, &sh->op_tag, 0,
+					    io_complete, op, 0,
 					    kv_reset_sgl, kv_next_sge);
 	}
 	if (rc != 0) {
 		return rc < 0 ? rc : -rc;
 	}
-	rc = poll_to_completion(sh);
-	if (rc != 0) {
-		return rc;
-	}
-	return status_to_rc(sh);
+	op->deadline = spdk_get_ticks() +
+		       (uint64_t)SPDK_SHIM_OP_TIMEOUT_S * spdk_get_ticks_hz();
+	inflight_push(sh, op);
+	return 0;
 }
 
 int
-spdk_shim_write(struct spdk_shim *sh, const void *buf, uint64_t lba,
-		   uint32_t lba_count)
+spdk_shim_write(struct spdk_shim *sh, struct spdk_shim_op *op, const void *buf,
+		   uint64_t lba, uint32_t lba_count)
 {
-	return blk_rw(sh, true, (void *)(uintptr_t)buf, lba, lba_count);
+	return blk_rw(sh, op, true, (void *)(uintptr_t)buf, lba, lba_count);
 }
 
 int
-spdk_shim_read(struct spdk_shim *sh, void *buf, uint64_t lba,
-		  uint32_t lba_count)
+spdk_shim_read(struct spdk_shim *sh, struct spdk_shim_op *op, void *buf,
+		  uint64_t lba, uint32_t lba_count)
 {
-	return blk_rw(sh, false, buf, lba, lba_count);
+	return blk_rw(sh, op, false, buf, lba, lba_count);
 }

@@ -67,7 +67,10 @@ public:
 };
 
 // Synchronous request handle: the shim ops complete inline, so we just stash
-// the final status produced by postXfer and report it in checkXfer.
+// Request handle. postXfer submits every descriptor's op and returns
+// NIXL_IN_PROG; checkXfer polls the shim until they have all been reaped. The
+// ops live here because a submitted op stays a live DMA target until it is
+// reaped or abandoned, which outlasts the postXfer call that made it.
 class nixlSpdkBackendReqH : public nixlBackendReqH {
 public:
     nixlSpdkBackendReqH() = default;
@@ -80,7 +83,24 @@ public:
         uint32_t nlba = 0;
     };
 
+    // One shim op per non-empty descriptor, with the descriptor index it came
+    // from (zero-length descriptors are skipped, so the indices have gaps).
+    struct Op {
+        spdk_shim_op op{};
+        int desc = -1;
+        void *user_buf = nullptr; // caller memory to copy a staged READ back into
+        size_t len = 0;
+        bool staged = false;
+        bool reaped = false;
+    };
+
     nixl_status_t status = NIXL_IN_PROG;
+    std::vector<Op> ops;
+    // Ops submitted and not yet reaped. checkXfer polls while this is non-zero.
+    size_t outstanding = 0;
+    // True for a READ, which is the only direction that copies a staged buffer
+    // back and the only one with value auto-sizing.
+    bool is_read = false;
     // Value auto-sizing: the device's TRUE value length recorded when a READ's
     // host buffer was too small (status == NIXL_ERR_MISMATCH). postXfer returns
     // at the FIRST too-small descriptor, so at most one is ever recorded -- a
@@ -244,65 +264,12 @@ nixlSpdkEngine::nixlSpdkEngine(const nixlBackendInitParams *init_params)
 }
 
 nixlSpdkEngine::~nixlSpdkEngine() {
-    // Free the reusable staging buffer (if any) BEFORE closing the shim. It is
-    // only ever cached after a HEALTHY op -- a poisoned op transfers its buffer to
-    // the shim's quarantine and NULLs the cache -- so its DMA tracker is dead and
-    // a direct free is safe, and it is never also in the quarantine (no
-    // double-free with spdk_shim_close's drain). Free it first because for an
-    // init_env=true shim spdk_shim_close() tears down the SPDK env, after which
-    // spdk_dma_free would be invalid.
-    if (stagingBuf_ != nullptr) {
-        spdk_shim_dma_free(stagingBuf_);
-        stagingBuf_ = nullptr;
-        stagingCap_ = 0;
-    }
+    // Staging buffers belong to their ops, and those belong to request handles
+    // NIXL has already released. spdk_shim_close() frees whatever an abandoned
+    // op left behind.
     if (shim_) {
         spdk_shim_close(shim_);
         shim_ = nullptr;
-    }
-}
-
-void *
-nixlSpdkEngine::stagingAcquire(size_t len, size_t align) const {
-    // Reuse the cached buffer in place when it is big enough. Alignment is
-    // invariant per engine (the KV path always passes 0, the block path always
-    // SPDK_SHIM_DMA_REGION), so a size check suffices.
-    if (stagingBuf_ != nullptr && stagingCap_ >= len) {
-        return stagingBuf_;
-    }
-    // Need a first or bigger buffer. The cache only ever holds a buffer whose last
-    // op completed cleanly (a poisoned op routes its buffer to quarantine and
-    // NULLs the cache in stagingRelease), so the old buffer's DMA tracker is dead
-    // and it is safe to free directly here before growing.
-    if (stagingBuf_ != nullptr) {
-        spdk_shim_dma_free(stagingBuf_);
-        stagingBuf_ = nullptr;
-        stagingCap_ = 0;
-    }
-    void *b = (align != 0) ? spdk_shim_dma_alloc_raw_aligned(len, align)
-                           : spdk_shim_dma_alloc_raw(len);
-    if (b == nullptr) {
-        return nullptr;
-    }
-    stagingBuf_ = b;
-    stagingCap_ = len;
-    return b;
-}
-
-void
-nixlSpdkEngine::stagingRelease(void *buf) const {
-    // POISON SAFETY (hard invariant from the fence design): if the op timed out or
-    // the qpair transport-failed, the shim is poisoned and buf's DMA tracker may
-    // still be live. Hand buf to spdk_shim_release_io_buf(), which QUARANTINES
-    // it (freed only at the fencing teardown in spdk_shim_close()), and DROP it
-    // from the reuse cache so this buffer -- now owned by the quarantine -- is
-    // never handed out again. On the healthy path the op's tracker is dead, so
-    // keep buf cached for the next descriptor/post (no free, no release) rather
-    // than churning an alloc+free per op.
-    if (spdk_shim_poisoned(shim_)) {
-        spdk_shim_release_io_buf(shim_, buf); // -> quarantine
-        stagingBuf_ = nullptr;
-        stagingCap_ = 0;
     }
 }
 
@@ -574,6 +541,13 @@ nixlSpdkEngine::postXfer(const nixl_xfer_op_t &operation,
     // to (true_len, i) only if a READ reports the host buffer was too small.
     req_h->true_len = 0;
     req_h->true_len_desc = -1;
+    req_h->is_read = (operation == NIXL_READ);
+    req_h->ops.clear();
+    req_h->outstanding = 0;
+    // Reserved once and never grown: the shim holds each op by address and the
+    // device writes into it, so a reallocation would leave the qpair pointing at
+    // freed memory.
+    req_h->ops.reserve(static_cast<size_t>(local.descCount()));
 
     for (int i = 0; i < local.descCount(); ++i) {
         const auto &local_desc = local[i];
@@ -607,102 +581,75 @@ nixlSpdkEngine::postXfer(const nixl_xfer_op_t &operation,
             continue;
         }
 
-        // Zero-copy vs staged, WITH DEMOTION. When the local DRAM was
-        // DMA-registered in registerMem, hand the caller's buffer straight to the
-        // shim (no alloc, no memcpy). When it was not (unaligned / unregisterable
-        // / only partially reachable), stage through an SPDK-DMA buffer and copy
-        // -- always correct, just a copy. A direct-path SUBMIT/reachability
-        // failure (a negative shim rc, e.g. a region-bounded SGL descriptor whose
-        // vaddr is not DMA-translatable) is NOT fatal: demote to the
-        // always-correct staged copy for THIS descriptor rather than failing the
-        // transfer. A device-reported status (non-negative rc, incl. the
-        // BUFFER_TOO_SMALL auto-sizing signal) is a real answer and is never
-        // demoted. prepXfer guarantees the local seg is DRAM_SEG and registerMem
-        // always builds a nixlSpdkDramMD for DRAM_SEG, so the local MD type is
-        // statically known -- static_cast; the nullptr guard still covers a
-        // descriptor registered with no MD (staged path).
+        // Zero-copy when registerMem made the caller's DRAM reachable, staged
+        // otherwise (unaligned, unregisterable, or only partially reachable).
+        // Staging is always correct, just a copy. A submit that fails on the
+        // direct path is not fatal, since nothing reached the qpair yet; demote
+        // that descriptor to a staged copy and retry. A failure reported at
+        // completion has no such retry and is surfaced as-is. prepXfer
+        // guarantees DRAM_SEG here and registerMem always builds a
+        // nixlSpdkDramMD for it, so the cast is safe; the nullptr guard covers a
+        // descriptor registered with no MD.
         auto *dram = static_cast<nixlSpdkDramMD *>(local_desc.metadataP);
         const bool direct = dram != nullptr && dram->dma_registered;
 
-        // Device TRUE value length for a READ (value auto-sizing); set by run_kv.
-        uint32_t value_len_out = 0;
-        // One attempt of the KV op over either the caller's buffer (use_direct)
-        // or a freshly staged SPDK-DMA copy. Returns the shim rc, or -ENOMEM if
-        // the staging allocation fails. On a READ that fits (rc==0) the staged
-        // copy is written back to the caller here.
-        auto run_kv = [&](bool use_direct) -> int {
+        req_h->ops.emplace_back();
+        auto &slot = req_h->ops.back();
+        slot.desc = i;
+        slot.user_buf = data_ptr;
+        slot.len = data_len;
+
+        // One submit attempt, direct or staged. The staging buffer belongs to
+        // the op and is freed when it is reaped, or quarantined if the op is
+        // abandoned with a live tracker.
+        auto submit_kv = [&](bool use_direct) -> int {
             void *io_buf = data_ptr;
             if (!use_direct) {
-                // Reuse the engine's cached, non-zeroing staging buffer. The
-                // whole span is memcpy'd (WRITE) or device-filled (READ) below, so
-                // the skipped zero-fill is never observed.
-                io_buf = stagingAcquire(data_len, 0);
+                // Non-zeroing: a write memcpys the whole span below and a read
+                // copies back only what the device wrote, so the skipped
+                // zero-fill is never observed.
+                io_buf = spdk_shim_dma_alloc_raw(data_len);
                 if (!io_buf) {
                     NIXL_ERROR << "SPDK: DMA buffer alloc failed (" << data_len << " bytes)";
                     return -ENOMEM;
                 }
+                if (operation == NIXL_WRITE) std::memcpy(io_buf, data_ptr, data_len);
             }
-            int r;
-            if (operation == NIXL_WRITE) {
-                if (!use_direct) std::memcpy(io_buf, data_ptr, data_len);
-                r = spdk_shim_store(shim_, key.data(),
-                                       static_cast<uint8_t>(key.size()),
-                                       io_buf, static_cast<uint32_t>(data_len));
-            } else { // NIXL_READ
-                r = spdk_shim_retrieve(shim_, key.data(),
-                                          static_cast<uint8_t>(key.size()),
-                                          io_buf, static_cast<uint32_t>(data_len),
-                                          &value_len_out);
-                // The whole value fit: value_len_out is the device's TRUE value
-                // length and is <= data_len. In staged mode copy exactly those
-                // bytes back; a value shorter than the buffer leaves the caller's
-                // tail untouched (we never over-read/over-copy). Because we copy
-                // back only these device-written bytes, the staging buffer's
-                // uninitialized (non-zeroed) tail never reaches the caller.
-                if (r == 0 && !use_direct) std::memcpy(data_ptr, io_buf, value_len_out);
+            spdk_shim_op_init(&slot.op);
+            slot.op.staging = use_direct ? nullptr : io_buf;
+            slot.staged = !use_direct;
+            const int r = (operation == NIXL_WRITE) ?
+                spdk_shim_store(shim_, &slot.op, key.data(),
+                                   static_cast<uint8_t>(key.size()),
+                                   io_buf, static_cast<uint32_t>(data_len)) :
+                spdk_shim_retrieve(shim_, &slot.op, key.data(),
+                                      static_cast<uint8_t>(key.size()),
+                                      io_buf, static_cast<uint32_t>(data_len));
+            if (r != 0 && !use_direct) {
+                spdk_shim_dma_free(io_buf);
+                slot.op.staging = nullptr;
             }
-            // Quarantine-aware release: on the healthy path the buffer stays
-            // cached for reuse; if the op timed out / transport-failed the shim is
-            // poisoned and this quarantines io_buf (freed later at the fencing
-            // teardown) and drops it from the cache, instead of recycling a
-            // possibly-live DMA target. Covers the demoted staged retry too.
-            if (!use_direct) stagingRelease(io_buf);
             return r;
         };
 
-        int rc = run_kv(direct);
+        int rc = submit_kv(direct);
         if (direct && rc < 0) {
-            NIXL_WARN << "SPDK: direct DMA failed for descriptor " << i
+            NIXL_WARN << "SPDK: direct submit failed for descriptor " << i
                       << " (rc=" << rc << "); demoting to a staged copy";
-            rc = run_kv(false);
-        }
-
-        if (operation == NIXL_READ && rc == SPDK_SHIM_SC_BUFFER_TOO_SMALL) {
-            // Value auto-sizing: the stored value is larger than the host buffer,
-            // so value_len_out is the TRUE length. Do NOT surface a truncated
-            // value: record the true length so the caller can resize its
-            // buffer/descriptor and re-Retrieve, and report a distinct MISMATCH
-            // status (not a generic backend error). Retrieved via
-            // getReqTrueLen(handle, i).
-            req_h->true_len = value_len_out;
-            req_h->true_len_desc = i;
-            NIXL_WARN << "SPDK: value (" << value_len_out
-                      << " B) exceeds host buffer (" << data_len
-                      << " B) for descriptor " << i
-                      << "; reporting true length for resize+retry";
-            req_h->status = NIXL_ERR_MISMATCH;
-            return NIXL_ERR_MISMATCH;
+            rc = submit_kv(false);
         }
         if (rc != 0) {
-            NIXL_ERROR << "SPDK: descriptor " << i << " transfer failed: rc=" << rc;
+            NIXL_ERROR << "SPDK: descriptor " << i << " submit failed: rc=" << rc;
+            req_h->ops.pop_back();
             req_h->status = NIXL_ERR_BACKEND;
             return NIXL_ERR_BACKEND;
         }
+        ++req_h->outstanding;
     }
 
-    // The shim ops are synchronous, so the transfer is already complete.
-    req_h->status = NIXL_SUCCESS;
-    return NIXL_SUCCESS;
+    // Every op is on the qpair. checkXfer reaps them.
+    req_h->status = req_h->outstanding == 0 ? NIXL_SUCCESS : NIXL_IN_PROG;
+    return req_h->status;
 }
 
 nixl_status_t
@@ -780,6 +727,12 @@ nixlSpdkEngine::postXferBlock(const nixl_xfer_op_t &operation,
     // Block has no value auto-sizing (getReqTrueLen -> 0).
     req_h->true_len = 0;
     req_h->true_len_desc = -1;
+    req_h->is_read = (operation == NIXL_READ);
+    req_h->ops.clear();
+    req_h->outstanding = 0;
+    // See the note in postXfer: the shim holds each op by address, so this
+    // vector must never reallocate once a submit has happened.
+    req_h->ops.reserve(static_cast<size_t>(local.descCount()));
 
     // prepXfer validated and stashed every (lba, nlba); consume it here rather
     // than recomputing computeBlockRange per descriptor (mirrors gusli, which
@@ -808,74 +761,64 @@ nixlSpdkEngine::postXferBlock(const nixl_xfer_op_t &operation,
 
         // Zero-copy: DMA straight to/from the caller's buffer when it was
         // DMA-registered in registerMem; otherwise stage through a 2 MiB-aligned
-        // SPDK DMA buffer and copy. Aligning the STAGING buffer to a 2 MiB DMA
-        // region makes each 2 MiB span its own region-bounded SGL data-block
-        // descriptor; the region-bounded SGL likewise bounds a registered (any
-        // 4 KiB-aligned) buffer at each 2 MiB boundary, so neither path lets a
-        // descriptor straddle two independently-mapped vfio-user regions (up to
-        // the ~64 MiB single-op bound). NO value auto-sizing (block moves exactly
-        // len bytes). Zero-copy vs staged, WITH DEMOTION (mirrors the KV path): a
-        // direct-path submit/reachability failure (negative rc) demotes to the
-        // always-correct staged copy for THIS descriptor rather than failing the
-        // transfer. prepXfer guarantees the local seg is DRAM_SEG and registerMem
-        // always builds a nixlSpdkDramMD for DRAM_SEG, so the local MD type is
-        // statically known -- static_cast; the nullptr guard still covers a
-        // descriptor registered with no MD (staged path).
+        // SPDK DMA buffer and copy. Aligning the staging buffer to a DMA region
+        // makes each 2 MiB span its own region-bounded SGL data block; a
+        // registered (4 KiB-aligned) buffer is bounded at each 2 MiB boundary
+        // too, so on neither path can a descriptor straddle two
+        // independently-mapped vfio-user regions. No value auto-sizing here; a
+        // block transfer moves exactly len bytes. Submit failures demote to a
+        // staged copy as they do on the KV path.
         auto *dram = static_cast<nixlSpdkDramMD *>(local_desc.metadataP);
         const bool direct = dram != nullptr && dram->dma_registered;
 
-        // One attempt of the block op over either the caller's buffer
-        // (use_direct) or a 2 MiB-aligned staged SPDK-DMA copy. Returns the shim
-        // rc, or -ENOMEM if the staging allocation fails.
-        auto run_blk = [&](bool use_direct) -> int {
+        req_h->ops.emplace_back();
+        auto &slot = req_h->ops.back();
+        slot.desc = i;
+        slot.user_buf = data_ptr;
+        slot.len = data_len;
+
+        auto submit_blk = [&](bool use_direct) -> int {
             void *io_buf = data_ptr;
             if (!use_direct) {
-                // Reuse the engine's cached, non-zeroing 2 MiB-aligned staging
-                // buffer. A block WRITE memcpys the whole span and a block READ
-                // fills every sector, so the skipped zero-fill is never observed.
-                io_buf = stagingAcquire(data_len, SPDK_SHIM_DMA_REGION);
+                io_buf = spdk_shim_dma_alloc_raw_aligned(data_len, SPDK_SHIM_DMA_REGION);
                 if (!io_buf) {
-                    NIXL_ERROR << "SPDK: block DMA buffer alloc failed (" << data_len << " bytes)";
+                    NIXL_ERROR << "SPDK: block DMA buffer alloc failed (" << data_len
+                               << " bytes)";
                     return -ENOMEM;
                 }
+                if (operation == NIXL_WRITE) std::memcpy(io_buf, data_ptr, data_len);
             }
-            int r;
-            if (operation == NIXL_WRITE) {
-                if (!use_direct) std::memcpy(io_buf, data_ptr, data_len);
-                r = spdk_shim_write(shim_, io_buf, lba, nlba);
-            } else { // NIXL_READ
-                // A block read fills every one of the data_len bytes (nlba full
-                // sectors), so copying the whole span back never exposes the
-                // staging buffer's uninitialized tail (there is none).
-                r = spdk_shim_read(shim_, io_buf, lba, nlba);
-                if (r == 0 && !use_direct) std::memcpy(data_ptr, io_buf, data_len);
+            spdk_shim_op_init(&slot.op);
+            slot.op.staging = use_direct ? nullptr : io_buf;
+            slot.staged = !use_direct;
+            const int r = (operation == NIXL_WRITE) ?
+                spdk_shim_write(shim_, &slot.op, io_buf, lba, nlba) :
+                spdk_shim_read(shim_, &slot.op, io_buf, lba, nlba);
+            if (r != 0 && !use_direct) {
+                spdk_shim_dma_free(io_buf);
+                slot.op.staging = nullptr;
             }
-            // Quarantine-aware release: on the healthy path the buffer stays
-            // cached for reuse; if the op timed out / transport-failed the shim is
-            // poisoned and this quarantines io_buf (freed later at the fencing
-            // teardown) and drops it from the cache, instead of recycling a
-            // possibly-live DMA target. Covers the demoted staged retry too.
-            if (!use_direct) stagingRelease(io_buf);
             return r;
         };
 
-        int rc = run_blk(direct);
+        int rc = submit_blk(direct);
         if (direct && rc < 0) {
-            NIXL_WARN << "SPDK: direct DMA failed for block descriptor " << i
+            NIXL_WARN << "SPDK: direct submit failed for block descriptor " << i
                       << " (rc=" << rc << "); demoting to a staged copy";
-            rc = run_blk(false);
+            rc = submit_blk(false);
         }
-
         if (rc != 0) {
-            NIXL_ERROR << "SPDK: block descriptor " << i << " transfer failed: rc=" << rc;
+            NIXL_ERROR << "SPDK: block descriptor " << i << " submit failed: rc=" << rc;
+            req_h->ops.pop_back();
             req_h->status = NIXL_ERR_BACKEND;
             return NIXL_ERR_BACKEND;
         }
+        ++req_h->outstanding;
     }
 
-    // The shim ops are synchronous, so the transfer is already complete.
-    req_h->status = NIXL_SUCCESS;
-    return NIXL_SUCCESS;
+    // Every op is on the qpair. checkXfer reaps them.
+    req_h->status = req_h->outstanding == 0 ? NIXL_SUCCESS : NIXL_IN_PROG;
+    return req_h->status;
 }
 
 nixl_status_t
@@ -884,7 +827,76 @@ nixlSpdkEngine::checkXfer(nixlBackendReqH *handle) const {
         NIXL_ERROR << "SPDK: transfer request handle is null";
         return NIXL_ERR_INVALID_PARAM;
     }
-    return static_cast<nixlSpdkBackendReqH *>(handle)->status;
+    auto *req_h = static_cast<nixlSpdkBackendReqH *>(handle);
+    if (req_h->outstanding == 0) {
+        return req_h->status;
+    }
+    // This is where the transfer progresses. Nothing else polls the qpair, so a
+    // request advances only as often as the application asks about it.
+    NIXL_LOCK_GUARD(shim_lock_);
+    if (!shim_) {
+        NIXL_ERROR << "SPDK: shim not initialized";
+        return NIXL_ERR_BACKEND;
+    }
+    const int poll_rc = spdk_shim_poll(shim_, 0);
+    if (poll_rc < 0) {
+        NIXL_ERROR << "SPDK: qpair poll failed: rc=" << poll_rc;
+        // Fall through rather than returning: the poll also expired every
+        // outstanding op, and reaping them is what routes their staging buffers
+        // to the quarantine.
+    }
+    reapOps(req_h);
+    return req_h->status;
+}
+
+// Collect every op that has completed or expired, apply its result to the
+// request's status, and copy a staged READ back to the caller. Must run with
+// shim_lock_ held.
+void
+nixlSpdkEngine::reapOps(nixlBackendReqH *handle) const {
+    auto *req_h = static_cast<nixlSpdkBackendReqH *>(handle);
+    for (auto &slot : req_h->ops) {
+        if (slot.reaped || !spdk_shim_op_done(&slot.op)) {
+            continue;
+        }
+        uint32_t value_len = 0;
+        const int rc = spdk_shim_op_result(shim_, &slot.op, &value_len);
+        slot.reaped = true;
+        --req_h->outstanding;
+
+        if (rc == 0 && slot.staged && req_h->is_read) {
+            // Copy back only what the device wrote: the KV value length, or
+            // the whole span for a block read, which fills every sector. The
+            // staging buffer is not zeroed, so its untouched tail must never
+            // reach the caller. Runs before the release below frees it.
+            const size_t n = value_len != 0 ? std::min<size_t>(value_len, slot.len) : slot.len;
+            std::memcpy(slot.user_buf, slot.op.staging, n);
+        }
+        spdk_shim_op_release(shim_, &slot.op);
+
+        if (req_h->is_read && rc == SPDK_SHIM_SC_BUFFER_TOO_SMALL) {
+            // Value auto-sizing: the stored value is longer than the host
+            // buffer, and value_len is its real length. Record it so the caller
+            // can resize and re-Retrieve, and report MISMATCH rather than a
+            // generic backend error, instead of handing back a truncated value.
+            // Read the length back with getReqTrueLen(handle, desc).
+            req_h->true_len = value_len;
+            req_h->true_len_desc = slot.desc;
+            NIXL_WARN << "SPDK: value (" << value_len << " B) exceeds host buffer ("
+                      << slot.len << " B) for descriptor " << slot.desc
+                      << "; reporting true length for resize+retry";
+            if (req_h->status == NIXL_IN_PROG) req_h->status = NIXL_ERR_MISMATCH;
+            continue;
+        }
+        if (rc != 0) {
+            NIXL_ERROR << "SPDK: descriptor " << slot.desc << " failed: rc=" << rc;
+            if (req_h->status == NIXL_IN_PROG) req_h->status = NIXL_ERR_BACKEND;
+            continue;
+        }
+    }
+    if (req_h->outstanding == 0 && req_h->status == NIXL_IN_PROG) {
+        req_h->status = NIXL_SUCCESS;
+    }
 }
 
 nixl_status_t
@@ -893,7 +905,22 @@ nixlSpdkEngine::releaseReqH(nixlBackendReqH *handle) const {
         NIXL_ERROR << "SPDK: transfer request handle is null";
         return NIXL_ERR_INVALID_PARAM;
     }
-    delete static_cast<nixlSpdkBackendReqH *>(handle);
+    auto *req_h = static_cast<nixlSpdkBackendReqH *>(handle);
+    // The ops live in the handle and the device writes into them until they
+    // complete or are abandoned, so this cannot free them while any is
+    // outstanding. Draining is bounded rather than open-ended, because the poll
+    // expires an op once it passes its deadline.
+    if (req_h->outstanding != 0) {
+        NIXL_LOCK_GUARD(shim_lock_);
+        while (req_h->outstanding != 0 && shim_ != nullptr) {
+            if (spdk_shim_poll(shim_, 0) < 0) {
+                reapOps(req_h);
+                break;
+            }
+            reapOps(req_h);
+        }
+    }
+    delete req_h;
     return NIXL_SUCCESS;
 }
 

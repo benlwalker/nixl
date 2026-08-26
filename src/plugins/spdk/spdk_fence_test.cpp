@@ -19,7 +19,7 @@
  * Pure-logic unit test for the shim fence (spdk_fence.{c,h}): the stale-
  * orphan discard, the poison latch, and the staging-buffer quarantine. It needs
  * no SPDK, no live NVMe target, and no hugepages -- it drives the exact decision
- * code the shim's io_complete()/poll_to_completion()/close() paths call.
+ * code the shim's io_complete()/spdk_shim_poll()/close() paths call.
  *
  * The one thing it cannot force here is a REAL hardware timeout (that needs a
  * wedged live target, driven by the run_*.sh harnesses); this asserts the fence
@@ -79,20 +79,19 @@ test_happy_path(void)
 
 	spdk_fence_init(&f);
 	CHECK(!spdk_fence_poisoned(&f));
-	CHECK(!spdk_fence_done(&f));
 
 	CHECK(spdk_fence_begin(&f, &tag));
-	CHECK(!spdk_fence_done(&f));
+	CHECK(!spdk_fence_done(&tag));
 	CHECK(spdk_fence_complete(&tag, 0 /*GENERIC*/, 0x00, 4096));
-	CHECK(spdk_fence_done(&f));
-	CHECK(f.op_sct == 0 && f.op_sc == 0x00 && f.op_cdw0 == 4096);
+	CHECK(spdk_fence_done(&tag));
+	CHECK(tag.op_sct == 0 && tag.op_sc == 0x00 && tag.op_cdw0 == 4096);
 }
 
 /*
- * The core mis-record bug: an earlier op's LATE completion must not be recorded
- * as a later op's status. Two distinct tags share one fence (exactly how a
- * future async datapath's per-op pool tags behave). Op A's orphan fires during
- * op B's wait; B must still report its OWN status/cdw0.
+ * The core mis-record bug: an abandoned op's LATE completion must not be
+ * recorded, and must not disturb a concurrent op. Two tags share one fence, as
+ * two in-flight ops do. A is abandoned, its orphan fires while B is still
+ * outstanding, and B must report its OWN status/cdw0.
  */
 static void
 test_stale_orphan_discarded(void)
@@ -103,21 +102,26 @@ test_stale_orphan_discarded(void)
 	spdk_fence_init(&f);
 
 	CHECK(spdk_fence_begin(&f, &tag_a)); /* gen N   */
-	CHECK(spdk_fence_begin(&f, &tag_b)); /* gen N+1 (A abandoned) */
+	CHECK(spdk_fence_begin(&f, &tag_b)); /* gen N+1 */
 	CHECK(tag_a.gen != tag_b.gen);
+
+	/* The submitter gives up on A; both are still in flight as far as the
+	 * device is concerned. */
+	spdk_fence_abandon(&tag_a);
 
 	/* A's orphan arrives first, carrying a bogus status + length. */
 	CHECK(!spdk_fence_complete(&tag_a, 1 /*non-generic*/, 0x85, 12345));
-	CHECK(!spdk_fence_done(&f)); /* discarded: B is still outstanding */
+	CHECK(!spdk_fence_done(&tag_a));
+	CHECK(!spdk_fence_done(&tag_b)); /* B untouched */
 
 	/* B's real completion records B's own status/length. */
 	CHECK(spdk_fence_complete(&tag_b, 0, 0x00, 42));
-	CHECK(spdk_fence_done(&f));
-	CHECK(f.op_sct == 0 && f.op_sc == 0x00 && f.op_cdw0 == 42);
+	CHECK(spdk_fence_done(&tag_b));
+	CHECK(tag_b.op_sct == 0 && tag_b.op_sc == 0x00 && tag_b.op_cdw0 == 42);
 
 	/* An even-later duplicate orphan for A is still discarded, not recorded. */
 	CHECK(!spdk_fence_complete(&tag_a, 1, 0x85, 12345));
-	CHECK(f.op_cdw0 == 42); /* B's value intact */
+	CHECK(tag_b.op_cdw0 == 42); /* B's value intact */
 }
 
 /* After a timeout/transport-fail poison, every begin() is refused until drain. */
@@ -132,7 +136,7 @@ test_poison_refuses_submits(void)
 	CHECK(spdk_fence_begin(&f, &tag));
 	gen_before = f.gen;
 
-	/* poll_to_completion() latches this on -ETIMEDOUT / -ENXIO. */
+	/* spdk_shim_poll() latches this on -ETIMEDOUT / -ENXIO. */
 	spdk_fence_poison(&f);
 	CHECK(spdk_fence_poisoned(&f));
 

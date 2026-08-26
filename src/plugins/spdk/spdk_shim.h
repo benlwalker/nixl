@@ -35,7 +35,13 @@
  * carries NO backend-specific behavior, NO KV Exec, and NO long-key
  * handling. Delete/List and VRAM/P2PDMA are deliberately left for later.
  *
- * Return convention for the op functions (store/retrieve/exist):
+ * The datapath is asynchronous. A submit call places the command on the qpair
+ * and returns; spdk_shim_poll() reaps completions, and the caller reads each
+ * op's result from its own spdk_shim_op. The qpair depth bounds how many may be
+ * in flight. spdk_shim_exist() is the exception, because NIXL gives queryMem no
+ * asynchronous contract, so it submits and polls inline.
+ *
+ * Return convention for an op's result (and for spdk_shim_exist):
  *   -  0 on SUCCESS (NVMe status code 0x00).
  *   -  a POSITIVE NVMe status code (sc) for a device-reported logical status
  *      when the status-code type (sct) is GENERIC (e.g. 0x85 BUFFER_TOO_SMALL,
@@ -48,12 +54,14 @@
 #ifndef SPDK_SHIM_H
 #define SPDK_SHIM_H
 
-/* Keep this public C ABI SPDK-include-free: pull size_t / fixed-width ints /
- * bool from the standard headers so includers are not forced onto SPDK's
- * include path. */
+/* Keep this header SPDK-include-free apart from the fence: pull size_t, the
+ * fixed-width ints and bool from the standard headers so includers are not
+ * forced onto SPDK's include path. */
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+
+#include "spdk_fence.h" /* struct spdk_op_tag, embedded in each in-flight op */
 
 /*
  * NVMe generic status codes surfaced verbatim through the op return convention,
@@ -96,6 +104,40 @@
 
 /** Opaque shim handle. */
 struct spdk_shim;
+
+/**
+ * One in-flight operation. The caller owns the storage and must keep it alive
+ * and unmoved from submit until the op is reaped, or until spdk_shim_close() if
+ * the op was abandoned, since the hardware tracker may still write to it.
+ *
+ * The fields are public so a caller can embed an array of these in its own
+ * request object instead of allocating one per op.
+ */
+struct spdk_shim_op {
+	/* Completion slot and identity; also the submit call's cb_arg. */
+	struct spdk_op_tag	tag;
+	/* Region-bounded SGL iterator for this op's buffer. lib/nvme drives it
+	 * through the reset/next callbacks with this op as the argument. */
+	const uint8_t		*sgl_base;
+	uint32_t		sgl_total;
+	uint32_t		sgl_off;
+	/* Deadline in ticks, checked by spdk_shim_poll(). */
+	uint64_t		deadline;
+	/*
+	 * Staging buffer this op owns, or NULL when it DMAs straight into the
+	 * caller's memory. Freed when the op is reaped, or quarantined if the op was
+	 * abandoned with a possibly-live tracker.
+	 */
+	void			*staging;
+	/* Set while the op is on the shim's in-flight list. */
+	bool			submitted;
+	/* Set by spdk_shim_poll() when the op passed its deadline. */
+	bool			expired;
+	/* Retrieve normalizes its short-buffer result; Store does not. */
+	bool			is_retrieve;
+	/* Links the shim's in-flight list; do not touch. */
+	struct spdk_shim_op	*next;
+};
 
 /**
  * Namespace kind to bind (ratified option (b): ONE namespace per engine,
@@ -230,15 +272,12 @@ void spdk_shim_dma_free(void *buf);
 void spdk_shim_release_io_buf(struct spdk_shim *sh, void *buf);
 
 /**
- * Is the shim POISONED? True once a prior op timed out or the qpair
- * transport-failed, leaving a possibly-live DMA tracker: every further op is then
- * refused (-ESHUTDOWN) until spdk_shim_close(). A caller that CACHES a staging
- * buffer for reuse queries this after an op to decide the buffer's fate: if
- * poisoned, the buffer it just used may still be a live DMA target, so it MUST be
- * handed to spdk_shim_release_io_buf() (which quarantines it) and DROPPED from
- * the reuse cache -- a quarantined buffer must never be recycled. On the healthy
- * (not poisoned) path the op's tracker is dead and the buffer may be reused.
- * Safe with \c sh == NULL (returns false).
+ * Is the shim POISONED? True once an op timed out or the qpair
+ * transport-failed, leaving a possibly-live DMA tracker: every further submit is
+ * then refused (-ESHUTDOWN) until spdk_shim_close(). Introspection only; the
+ * datapath does not need to consult it, because spdk_shim_op_release() already
+ * routes an abandoned op's staging buffer to the quarantine. Safe with
+ * \c sh == NULL (returns false).
  */
 bool spdk_shim_poisoned(const struct spdk_shim *sh);
 
@@ -306,51 +345,76 @@ uint32_t spdk_shim_max_key_len(const struct spdk_shim *sh);
 uint32_t spdk_shim_max_value_len_op(const struct spdk_shim *sh);
 
 /**
- * KV Store \c value (\c value_len bytes) under \c key. \c value must be a
- * DMA-capable buffer (from spdk_shim_dma_alloc()). Large values are carried
- * by a region-bounded SGL (one data-block per 2 MiB region); a value larger
- * than spdk_shim_max_value_len_op() is rejected with -EFBIG (NOT striped).
- *
- * \return per the return convention documented at the top of this header.
+ * Reset \c op to the clean, unsubmitted state. Call before each submit; an op
+ * may be reused once it has been reaped.
  */
-int spdk_shim_store(struct spdk_shim *sh, const void *key, uint8_t key_len,
+void spdk_shim_op_init(struct spdk_shim_op *op);
+
+/**
+ * Submit a KV Store of \c value (\c value_len bytes) under \c key. \c value
+ * must be DMA-reachable. Large values are carried by a region-bounded SGL (one
+ * data block per 2 MiB region); a value larger than
+ * spdk_shim_max_value_len_op() is rejected with -EFBIG (NOT striped).
+ *
+ * \return 0 once the command is on the qpair, or a negated errno if it was
+ * never submitted (in which case \c op is not in flight and holds no result).
+ */
+int spdk_shim_store(struct spdk_shim *sh, struct spdk_shim_op *op,
+		       const void *key, uint8_t key_len,
 		       const void *value, uint32_t value_len);
 
 /**
- * KV Retrieve the value for \c key into \c value (\c buf_len bytes). \c value
- * must be a DMA-capable buffer. Large buffers are described by a region-bounded
- * SGL (one data-block per 2 MiB region); a \c buf_len larger than
- * spdk_shim_max_value_len_op() is rejected with -EFBIG (NOT striped).
+ * Submit a KV Retrieve for \c key into \c value (\c buf_len bytes). Same
+ * buffer and size rules as spdk_shim_store(). The device's real stored value
+ * length comes back through spdk_shim_op_result().
  *
- * Value auto-sizing: the completion cdw0 reports the device's TRUE stored value
- * length, which \c *value_len_out (when non-NULL) receives on both of the
- * value-bearing returns below so a short buffer can be resized and retried:
- *   - return 0 (SUCCESS): the whole value fit; \c *value_len_out is the true
- *     length and is <= \c buf_len (the first \c *value_len_out bytes are valid).
+ * \return as spdk_shim_store().
+ */
+int spdk_shim_retrieve(struct spdk_shim *sh, struct spdk_shim_op *op,
+			  const void *key, uint8_t key_len,
+			  void *value, uint32_t buf_len);
+
+/**
+ * Reap completions on the qpair and expire any op past its deadline. Runs each
+ * completed op's callback, after which spdk_shim_op_done() is true for it.
+ *
+ * \param max Completions to reap at most; 0 means no limit.
+ *
+ * \return the number of completions reaped, or a negated errno if the qpair
+ * failed at the transport level (which also poisons the shim).
+ */
+int spdk_shim_poll(struct spdk_shim *sh, uint32_t max);
+
+/** Has \c op completed (or been expired by spdk_shim_poll())? */
+bool spdk_shim_op_done(const struct spdk_shim_op *op);
+
+/**
+ * Read a completed op's result and take it off the in-flight list. \c op must
+ * be done. This does NOT release the op's staging buffer: a staged READ still
+ * has to be copied back to the caller first. Call spdk_shim_op_release()
+ * afterwards, always. For a Retrieve, \c value_len_out
+ * (when non-NULL) receives the device's real stored value length on both
+ * value-bearing returns, so a short buffer can be resized and retried:
+ *   - return 0 (SUCCESS): the whole value fit and \c *value_len_out <= buf_len.
  *   - return SPDK_SHIM_SC_BUFFER_TOO_SMALL (0x85): the stored value is longer
- *     than \c buf_len; \c *value_len_out is the true length (> \c buf_len) and
- *     the buffer holds at most \c buf_len bytes of a longer value (treat the
- *     contents as unusable). The caller resizes to \c *value_len_out and
- *     re-Retrieves (which builds a larger, still region-bounded SGL). Devices
- *     signal a short buffer two ways -- SUCCESS with cdw0 > buf_len, or 0x85
- *     directly -- and BOTH are normalized to this 0x85 return so the caller has
- *     one contract.
- * On any other return (absent key 0x87, other device sc, or a negated errno)
- * \c *value_len_out is left untouched.
+ *     than the buffer, \c *value_len_out is its real length, and the buffer
+ *     holds at most buf_len bytes of it (treat the contents as unusable).
+ * Devices signal a short buffer two ways, SUCCESS with cdw0 > buf_len or 0x85
+ * directly, and both are normalized to 0x85 so the caller has one contract.
  *
  * \return per the return convention documented at the top of this header.
  */
-int spdk_shim_retrieve(struct spdk_shim *sh, const void *key, uint8_t key_len,
-			  void *value, uint32_t buf_len, uint32_t *value_len_out);
+int spdk_shim_op_result(struct spdk_shim *sh, struct spdk_shim_op *op,
+			   uint32_t *value_len_out);
 
 /**
- * KV Exist: query whether \c key is present. This maps NIXL queryMem / QUERY to
- * the NVMe-KV Exist op; it transfers NO value data (cache hit/miss only).
- *
- * \return 0 if the key exists (hit); SPDK_SHIM_SC_KEY_DOES_NOT_EXIST (0x87)
- * if absent (miss); another positive NVMe sc for a device error; a negated
- * errno for submit-/transport-level errors -- per the return convention above.
+ * Release what \c op holds after its result has been read. Normally this frees
+ * the staging buffer, but if the op was abandoned with a possibly-live tracker
+ * the buffer is QUARANTINED instead and freed at the fencing teardown in
+ * spdk_shim_close(). Safe on an op with no staging buffer.
  */
+void spdk_shim_op_release(struct spdk_shim *sh, struct spdk_shim_op *op);
+
 int spdk_shim_exist(struct spdk_shim *sh, const void *key, uint8_t key_len);
 
 /* --------------------------------------------------------------------------
@@ -393,8 +457,8 @@ uint32_t spdk_shim_max_block_len_op(const struct spdk_shim *sh);
  *         (0 on success; -EINVAL on a bad/out-of-range request; -EFBIG when
  *         past the single-op bound; -ENXIO etc.).
  */
-int spdk_shim_write(struct spdk_shim *sh, const void *buf, uint64_t lba,
-		       uint32_t lba_count);
+int spdk_shim_write(struct spdk_shim *sh, struct spdk_shim_op *op,
+		       const void *buf, uint64_t lba, uint32_t lba_count);
 
 /**
  * Block read: copy \c lba_count sectors from the namespace starting at \c lba
@@ -403,7 +467,7 @@ int spdk_shim_write(struct spdk_shim *sh, const void *buf, uint64_t lba,
  *
  * \return per the return convention documented at the top of this header.
  */
-int spdk_shim_read(struct spdk_shim *sh, void *buf, uint64_t lba,
-		      uint32_t lba_count);
+int spdk_shim_read(struct spdk_shim *sh, struct spdk_shim_op *op,
+		      void *buf, uint64_t lba, uint32_t lba_count);
 
 #endif /* SPDK_SHIM_H */

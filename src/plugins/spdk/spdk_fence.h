@@ -28,12 +28,13 @@
  *   3. QUARANTINE a staging buffer whose DMA tracker may still be live, freeing
  *      it only after a fencing teardown proves the tracker dead.
  *
- * Composition note: the shim embeds ONE fence and ONE op tag because its
- * datapath is strictly synchronous (one op in flight, and further submits are
- * refused while poisoned, so the single tag is never reused under a live
- * tracker). A future async datapath keeps this same fence but allocates a
- * per-op tag from a pool; the generation stamped into each tag is exactly what
- * lets a completion tell concurrent ops apart, so none of this logic changes.
+ * Composition note: the shim embeds ONE fence, which is device-level state, and
+ * one tag PER IN-FLIGHT OP. The tag carries that op's completion slot, so
+ * concurrent ops never share one. Abandoning an op (timeout, transport failure)
+ * marks its tag rather than freeing it, because the hardware tracker may still
+ * be live: a late orphan then writes into memory that is still allocated and
+ * that nobody reads. The tag and its staging buffer are released together at
+ * the fencing teardown.
  */
 
 #ifndef SPDK_FENCE_H
@@ -56,18 +57,11 @@ struct spdk_quarantine_node {
  */
 struct spdk_fence {
 	/*
-	 * Generation of the op the current poller is waiting for. Bumped on every
-	 * begin(); a completion whose captured generation differs is a stale orphan
-	 * from an earlier (timed-out / failed) op and is discarded rather than
-	 * recorded into the current op's slot.
+	 * Monotonic op counter. Each begin() stamps the next value into the tag, so
+	 * every op carries a distinct identity for logging and for telling two
+	 * in-flight ops apart in a trace.
 	 */
 	uint64_t			gen;
-	/* Captured completion for the in-flight op: written by the matching
-	 * completion callback, read back after the poll. */
-	volatile bool			op_done;
-	volatile uint8_t		op_sct;
-	volatile uint8_t		op_sc;
-	volatile uint32_t		op_cdw0;
 	/*
 	 * Latched true once a timeout / transport failure left a possibly-live DMA
 	 * tracker. While set, begin() refuses every new op so no later op can be
@@ -81,12 +75,26 @@ struct spdk_fence {
 };
 
 /**
- * Per-op completion callback argument: carries the fence plus the submit-time
- * generation so a completion callback can reject a late orphan.
+ * Per-op state and completion callback argument. One per in-flight op: the
+ * completion callback writes this op's status here, and the submitter reads it
+ * back once done. Zero-initialization is the clean state.
  */
 struct spdk_op_tag {
 	struct spdk_fence		*fence;
+	/* This op's identity, stamped by begin() from the fence's counter. */
 	uint64_t			gen;
+	/* Completion, written by the callback and read after the poll. */
+	volatile bool			op_done;
+	volatile uint8_t		op_sct;
+	volatile uint8_t		op_sc;
+	volatile uint32_t		op_cdw0;
+	/*
+	 * Set once the submitter has given up on this op (timeout, transport
+	 * failure). A completion arriving afterwards is discarded instead of being
+	 * recorded, and the tag must stay allocated until the fencing teardown
+	 * proves the tracker dead.
+	 */
+	bool				abandoned;
 };
 
 /** Initialise a fence to the clean, un-poisoned, empty-quarantine state. */
@@ -94,24 +102,30 @@ void spdk_fence_init(struct spdk_fence *f);
 
 /**
  * Begin a new op. If the fence is poisoned, refuse (return false, change
- * nothing). Otherwise bump the generation, clear the completion slot, stamp
- * \c tag with this op's identity, and return true. Hand \c tag to the submit
- * call as its completion cb_arg.
+ * nothing). Otherwise stamp \c tag with the next generation and clear its
+ * completion slot, and return true. Hand \c tag to the submit call as its
+ * completion cb_arg.
  */
 bool spdk_fence_begin(struct spdk_fence *f, struct spdk_op_tag *tag);
 
 /**
- * Record a completion for the op identified by \c tag. If the tag's generation
- * no longer matches the fence -- a stale orphan from an op that already timed
- * out -- the completion is DISCARDED (return false) and the current slot is
- * left intact. Otherwise the status is captured, op_done is latched, and it
- * returns true.
+ * Record a completion for the op identified by \c tag. If that op was abandoned
+ * -- a stale orphan from an op that already timed out -- the completion is
+ * DISCARDED (return false). Otherwise the status is captured, op_done is
+ * latched, and it returns true.
  */
 bool spdk_fence_complete(struct spdk_op_tag *tag, uint8_t sct, uint8_t sc,
 			    uint32_t cdw0);
 
-/** True once the in-flight op's completion has been recorded. */
-bool spdk_fence_done(const struct spdk_fence *f);
+/** True once this op's completion has been recorded. */
+bool spdk_fence_done(const struct spdk_op_tag *tag);
+
+/**
+ * Give up on \c tag's op: a completion arriving later is discarded. The tag
+ * itself must stay allocated until spdk_fence_drain() runs, since the hardware
+ * tracker may still write to it.
+ */
+void spdk_fence_abandon(struct spdk_op_tag *tag);
 
 /** Latch the fence poisoned after a timeout / transport failure. Idempotent. */
 void spdk_fence_poison(struct spdk_fence *f);
