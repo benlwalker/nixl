@@ -24,23 +24,70 @@
 # Location of the (already-built) SPDK tree we link against.
 spdk_root = get_option('spdk_root')
 
-spdk_build_lib = spdk_root / 'build' / 'lib'
-spdk_build_inc = spdk_root / 'build' / 'include'
-spdk_inc = spdk_root / 'include'
-dpdk_lib = spdk_root / 'dpdk' / 'build' / 'lib'
-vfu_lib = spdk_root / 'build' / 'libvfio-user' / 'usr' / 'local' / 'lib'
+# Where the SPDK .pc files live. An in-tree SPDK build writes them under
+# build/lib/pkgconfig; leaving spdk_root unset falls back to whatever pkg-config
+# already finds, so a system or otherwise-installed SPDK needs no option at all.
+spdk_pc_env = {}
+if spdk_root != ''
+    spdk_pc_env = {'PKG_CONFIG_PATH': spdk_root / 'build' / 'lib' / 'pkgconfig'}
+endif
 
-# The plugin is gated on the prebuilt SPDK NVMe library (which carries the KV
-# command set) and the KV public header. Skip cleanly when they are absent.
-# These checks need no C compiler, so run them before acquiring one: a default
-# `meson setup` reaches this file (SPDK is in all_plugins), and on a host with
-# no SPDK build the plugin must skip rather than fail configuration.
-if not fs.exists(spdk_build_lib / 'libspdk_nvme.a')
-    warning('SPDK plugin disabled: SPDK nvme lib not found under ' + spdk_build_lib)
+# The components this plugin links against. spdk_nvme pulls the rest of the
+# datapath closure (sock, dma, json, util, log, ...) through its Requires, and
+# spdk_vfio_user adds the VFIOUSER transport. spdk_env_dpdk is the env
+# implementation; it drops out when the plugin brings its own.
+spdk_pc_components = ['spdk_nvme', 'spdk_vfio_user', 'spdk_env_dpdk']
+
+# The plugin is gated on that closure resolving and on the KV public header.
+# Skip cleanly when either is absent. These checks need no C compiler, so they
+# run before acquiring one: a default `meson setup` reaches this file (SPDK is
+# in all_plugins), and on a host with no SPDK build the plugin must skip rather
+# than fail configuration.
+pkgconfig_prog = find_program('pkg-config', required: false)
+if not pkgconfig_prog.found()
+    warning('SPDK plugin disabled: pkg-config not found')
     subdir_done()
 endif
-if not fs.exists(spdk_inc / 'spdk' / 'nvme_kv.h')
-    warning('SPDK plugin disabled: spdk/nvme_kv.h not found under ' + spdk_inc)
+
+# spdk_syslibs is queried separately rather than as part of the closure: it
+# names the system and ISA-L libraries the SPDK archives depend on, which have
+# to land outside the --whole-archive group. It is still required, so it belongs
+# in this gate.
+spdk_pc_ok = true
+foreach spdk_pc_component : spdk_pc_components + ['spdk_syslibs']
+    if spdk_pc_ok
+        spdk_pc_probe = run_command(pkgconfig_prog, '--exists', spdk_pc_component,
+                                    env: spdk_pc_env, check: false)
+        spdk_pc_ok = spdk_pc_probe.returncode() == 0
+    endif
+endforeach
+if not spdk_pc_ok
+    warning('SPDK plugin disabled: SPDK pkg-config components not found' +
+            (spdk_root != '' ? ' under ' + spdk_root : ''))
+    subdir_done()
+endif
+
+# Include directories come from the same pkg-config query, so an SPDK laid out
+# any other way than an in-tree build still works.
+spdk_pc_cflags = run_command(pkgconfig_prog, '--cflags-only-I', spdk_pc_components,
+                             env: spdk_pc_env, check: true)
+spdk_inc_paths = []
+foreach spdk_pc_flag : spdk_pc_cflags.stdout().split()
+    if spdk_pc_flag.startswith('-I') and not spdk_inc_paths.contains(spdk_pc_flag.substring(2))
+        spdk_inc_paths += spdk_pc_flag.substring(2)
+    endif
+endforeach
+
+# The KV command set is what this plugin speaks, so its public header has to be
+# present in whichever include tree pkg-config just named.
+spdk_have_kv = false
+foreach spdk_inc_path : spdk_inc_paths
+    if fs.exists(spdk_inc_path / 'spdk' / 'nvme_kv.h')
+        spdk_have_kv = true
+    endif
+endforeach
+if not spdk_have_kv
+    warning('SPDK plugin disabled: spdk/nvme_kv.h not found in the SPDK include path')
     subdir_done()
 endif
 
@@ -62,7 +109,7 @@ cc = meson.get_compiler('c')
 # Include dirs: the plugin's own headers, plus the SPDK C headers (needed by
 # the C shim and by the C++ TUs that include spdk_shim.h).
 spdk_local_inc = include_directories('.')
-spdk_spdk_inc = include_directories(spdk_inc, spdk_build_inc, is_system: true)
+spdk_spdk_inc = include_directories(spdk_inc_paths, is_system: true)
 
 # Build the C shim (spdk_shim.c) into its own static lib so the C compile
 # flags and the C-only SPDK headers stay isolated from the C++ plugin TUs.
@@ -74,59 +121,69 @@ spdk_shim_lib = static_library(
     install: false,
 )
 
-# SPDK whole-archive set. The ordering and the whole-archive wrapping around the
-# SPDK + DPDK static libs is required so the env/transport registration
-# constructors are pulled in. (This is the SPDK KV host-test link line.)
-spdk_libs = [
-    'spdk_sock_posix', 'spdk_nvme', 'spdk_keyring', 'spdk_sock', 'spdk_trace',
-    'spdk_rpc', 'spdk_jsonrpc', 'spdk_json', 'spdk_dma', 'spdk_vfio_user',
-    'spdk_vmd', 'spdk_util', 'spdk_log',
-]
+# Resolve the SPDK link closure with pkg-config rather than naming the archives.
+# Which libraries an SPDK build produces depends on how it was configured and on
+# its DPDK version: a build without VMD has no libspdk_vmd.a, and a DPDK older
+# than the argparse split has no librte_argparse.a. A fixed list fails to link
+# against either, and both are ordinary SPDK builds.
+spdk_pc_libs = run_command(pkgconfig_prog, '--libs', spdk_pc_components,
+                           env: spdk_pc_env, check: true)
+spdk_pc_libdirs = run_command(pkgconfig_prog, '--libs-only-L', spdk_pc_components,
+                              env: spdk_pc_env, check: true)
 
-dpdk_libs = [
-    'rte_argparse', 'rte_bus_pci', 'rte_cryptodev', 'rte_dmadev', 'rte_eal',
-    'rte_ethdev', 'rte_hash', 'rte_kvargs', 'rte_log', 'rte_mbuf',
-    'rte_mempool', 'rte_mempool_ring', 'rte_meter', 'rte_net', 'rte_pci',
-    'rte_power', 'rte_power_acpi', 'rte_power_amd_pstate', 'rte_power_cppc',
-    'rte_power_intel_pstate', 'rte_power_intel_uncore', 'rte_power_kvm_vm',
-    'rte_rcu', 'rte_ring', 'rte_telemetry', 'rte_timer', 'rte_vhost',
-]
-
-spdk_link_args = ['-L' + spdk_build_lib, '-L' + vfu_lib, '-L' + dpdk_lib]
-# Link the SPDK libs by their explicit .a paths (not -l) so we statically link
-# them even when the SPDK build dir also ships .so files (in which case -l would
-# prefer the .so and leave the binary with an unsatisfiable runtime dependency).
-# This matches how the DPDK archives are given explicitly below.
-spdk_link_args += ['-Wl,--whole-archive', '-Wl,--no-as-needed']
-foreach l : spdk_libs
-    spdk_link_args += [spdk_build_lib / ('lib' + l + '.a')]
-endforeach
-spdk_link_args += ['-Wl,--no-whole-archive']
-spdk_link_args += [spdk_build_lib / 'libspdk_env_dpdk.a']
-spdk_link_args += ['-Wl,--whole-archive']
-foreach l : dpdk_libs
-    spdk_link_args += [dpdk_lib / ('lib' + l + '.a')]
-endforeach
-spdk_link_args += ['-Wl,--no-whole-archive']
-
-# isa-l static archives provide the crc/xor symbols referenced by spdk_util.
-foreach isal : [spdk_root / 'isa-l' / '.libs' / 'libisal.a',
-                spdk_root / 'isa-l-crypto' / '.libs' / 'libisal_crypto.a']
-    if fs.exists(isal)
-        spdk_link_args += [isal]
+# The archives live in more than one directory (SPDK's own build/lib and DPDK's
+# build/lib), so each -l is matched against every -L pkg-config reported.
+spdk_search_dirs = []
+foreach spdk_pc_flag : spdk_pc_libdirs.stdout().split()
+    if spdk_pc_flag.startswith('-L') and not spdk_search_dirs.contains(spdk_pc_flag.substring(2))
+        spdk_search_dirs += spdk_pc_flag.substring(2)
     endif
 endforeach
 
-# Tail system deps required by the SPDK/DPDK static archives. fuse3/fuse
-# satisfy the CUSE code pulled in by statically linking libspdk_nvme.a.
-foreach syslib : ['numa', 'dl', 'rt', 'uuid', 'ssl', 'crypto', 'm', 'lz4',
-                  'keyutils', 'aio', 'rados', 'rbd', 'vfio-user', 'json-c',
-                  'fuse3', 'fuse']
-    dep = cc.find_library(syslib, required: false)
-    if dep.found()
-        spdk_link_args += ['-l' + syslib]
+# Resolve each -lspdk_*/-lrte_* to its full .a path instead of passing the flag
+# through. Two reasons: a build dir that also ships .so files would otherwise be
+# linked dynamically and leave an unsatisfiable runtime dependency, and meson
+# reorders bare -l flags out of a raw -Wl,--whole-archive group, which silently
+# drops the constructor-only registrations the env and transports rely on.
+# Anything that does not resolve to an archive (system -l, -pthread, ...) is
+# kept in order and lands outside the group.
+spdk_archives = []
+spdk_tail_args = []
+foreach spdk_pc_flag : spdk_pc_libs.stdout().split()
+    if spdk_pc_flag.startswith('-L')
+        # Folded into the resolved archive paths.
+    elif spdk_pc_flag.startswith('-l')
+        spdk_archive_name = 'lib' + spdk_pc_flag.substring(2) + '.a'
+        spdk_archive_path = ''
+        foreach spdk_search_dir : spdk_search_dirs
+            if spdk_archive_path == '' and fs.exists(spdk_search_dir / spdk_archive_name)
+                spdk_archive_path = spdk_search_dir / spdk_archive_name
+            endif
+        endforeach
+        if spdk_archive_path != ''
+            spdk_archives += spdk_archive_path
+        else
+            spdk_tail_args += spdk_pc_flag
+        endif
+    else
+        spdk_tail_args += spdk_pc_flag
     endif
 endforeach
+
+# Whole-archive the SPDK and DPDK static libs so their constructor-based
+# self-registration (env, transports, bus drivers) survives the link.
+spdk_link_args = ['-Wl,--no-as-needed', '-Wl,--whole-archive']
+spdk_link_args += spdk_archives
+spdk_link_args += ['-Wl,--no-whole-archive']
+spdk_link_args += spdk_tail_args
+
+# The system and ISA-L libraries the SPDK archives depend on. Taken from
+# pkg-config rather than hardcoded, because which ones are needed depends on how
+# SPDK was configured. These belong after --no-whole-archive: they carry no
+# constructor registrations and whole-archiving them would drag in every object.
+spdk_syslibs_pc = run_command(pkgconfig_prog, '--libs', 'spdk_syslibs',
+                              env: spdk_pc_env, check: true)
+spdk_link_args += spdk_syslibs_pc.stdout().split()
 
 spdk_sources = [
     'spdk_backend.cpp',
