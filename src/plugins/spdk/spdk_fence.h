@@ -46,8 +46,8 @@
 
 /** A quarantined staging buffer awaiting release after the fencing teardown. */
 struct spdk_quarantine_node {
-	void				*buf;
-	struct spdk_quarantine_node	*next;
+    void *buf;
+    struct spdk_quarantine_node *next;
 };
 
 /**
@@ -56,22 +56,22 @@ struct spdk_quarantine_node {
  * what spdk_fence_init() also produces.
  */
 struct spdk_fence {
-	/*
-	 * Monotonic op counter. Each begin() stamps the next value into the tag, so
-	 * every op carries a distinct identity for logging and for telling two
-	 * in-flight ops apart in a trace.
-	 */
-	uint64_t			gen;
-	/*
-	 * Latched true once a timeout / transport failure left a possibly-live DMA
-	 * tracker. While set, begin() refuses every new op so no later op can be
-	 * corrupted by the orphan or DMA into a freed buffer; cleared only by
-	 * drain() after a fencing teardown.
-	 */
-	bool				poisoned;
-	/* Staging buffers from poisoned ops, released only once drain() runs after
-	 * the fencing teardown proves the tracker dead. */
-	struct spdk_quarantine_node	*quarantine;
+    /*
+     * Monotonic op counter. Each begin() stamps the next value into the tag, so
+     * every op carries a distinct identity for logging and for telling two
+     * in-flight ops apart in a trace.
+     */
+    uint64_t gen;
+    /*
+     * Latched true once a timeout / transport failure left a possibly-live DMA
+     * tracker. While set, begin() refuses every new op so no later op can be
+     * corrupted by the orphan or DMA into a freed buffer; cleared only by
+     * drain() after a fencing teardown.
+     */
+    bool poisoned;
+    /* Staging buffers from poisoned ops, released only once drain() runs after
+     * the fencing teardown proves the tracker dead. */
+    struct spdk_quarantine_node *quarantine;
 };
 
 /**
@@ -80,25 +80,26 @@ struct spdk_fence {
  * back once done. Zero-initialization is the clean state.
  */
 struct spdk_op_tag {
-	struct spdk_fence		*fence;
-	/* This op's identity, stamped by begin() from the fence's counter. */
-	uint64_t			gen;
-	/* Completion, written by the callback and read after the poll. */
-	volatile bool			op_done;
-	volatile uint8_t		op_sct;
-	volatile uint8_t		op_sc;
-	volatile uint32_t		op_cdw0;
-	/*
-	 * Set once the submitter has given up on this op (timeout, transport
-	 * failure). A completion arriving afterwards is discarded instead of being
-	 * recorded, and the tag must stay allocated until the fencing teardown
-	 * proves the tracker dead.
-	 */
-	bool				abandoned;
+    struct spdk_fence *fence;
+    /* This op's identity, stamped by begin() from the fence's counter. */
+    uint64_t gen;
+    /* Completion, written by the callback and read after the poll. */
+    volatile bool op_done;
+    volatile uint8_t op_sct;
+    volatile uint8_t op_sc;
+    volatile uint32_t op_cdw0;
+    /*
+     * Set once the submitter has given up on this op (timeout, transport
+     * failure). A completion arriving afterwards is discarded instead of being
+     * recorded, and the tag must stay allocated until the fencing teardown
+     * proves the tracker dead.
+     */
+    bool abandoned;
 };
 
 /** Initialise a fence to the clean, un-poisoned, empty-quarantine state. */
-void spdk_fence_init(struct spdk_fence *f);
+void
+spdk_fence_init(struct spdk_fence *f);
 
 /**
  * Begin a new op. If the fence is poisoned, refuse (return false, change
@@ -106,7 +107,8 @@ void spdk_fence_init(struct spdk_fence *f);
  * completion slot, and return true. Hand \c tag to the submit call as its
  * completion cb_arg.
  */
-bool spdk_fence_begin(struct spdk_fence *f, struct spdk_op_tag *tag);
+bool
+spdk_fence_begin(struct spdk_fence *f, struct spdk_op_tag *tag);
 
 /**
  * Record a completion for the op identified by \c tag. If that op was abandoned
@@ -114,24 +116,28 @@ bool spdk_fence_begin(struct spdk_fence *f, struct spdk_op_tag *tag);
  * DISCARDED (return false). Otherwise the status is captured, op_done is
  * latched, and it returns true.
  */
-bool spdk_fence_complete(struct spdk_op_tag *tag, uint8_t sct, uint8_t sc,
-			    uint32_t cdw0);
+bool
+spdk_fence_complete(struct spdk_op_tag *tag, uint8_t sct, uint8_t sc, uint32_t cdw0);
 
 /** True once this op's completion has been recorded. */
-bool spdk_fence_done(const struct spdk_op_tag *tag);
+bool
+spdk_fence_done(const struct spdk_op_tag *tag);
 
 /**
  * Give up on \c tag's op: a completion arriving later is discarded. The tag
  * itself must stay allocated until spdk_fence_drain() runs, since the hardware
  * tracker may still write to it.
  */
-void spdk_fence_abandon(struct spdk_op_tag *tag);
+void
+spdk_fence_abandon(struct spdk_op_tag *tag);
 
 /** Latch the fence poisoned after a timeout / transport failure. Idempotent. */
-void spdk_fence_poison(struct spdk_fence *f);
+void
+spdk_fence_poison(struct spdk_fence *f);
 
 /** True while the fence is poisoned (refusing new ops until drain()). */
-bool spdk_fence_poisoned(const struct spdk_fence *f);
+bool
+spdk_fence_poisoned(const struct spdk_fence *f);
 
 /**
  * Quarantine staging buffer \c buf whose op left a possibly-live DMA tracker,
@@ -140,7 +146,8 @@ bool spdk_fence_poisoned(const struct spdk_fence *f);
  * case the caller MUST NOT free \c buf (leaking it is strictly safer than a
  * use-after-free into memory the recovered target may still DMA into).
  */
-int spdk_fence_quarantine(struct spdk_fence *f, void *buf);
+int
+spdk_fence_quarantine(struct spdk_fence *f, void *buf);
 
 /**
  * Release every quarantined buffer with \c free_buf (invoked exactly once per
@@ -148,6 +155,7 @@ int spdk_fence_quarantine(struct spdk_fence *f, void *buf);
  * only after a fencing teardown (qpair free / ctrlr reset) has proven the
  * hardware trackers dead, so no completion can reference a freed buffer.
  */
-void spdk_fence_drain(struct spdk_fence *f, void (*free_buf)(void *));
+void
+spdk_fence_drain(struct spdk_fence *f, void (*free_buf)(void *));
 
 #endif /* SPDK_FENCE_H */

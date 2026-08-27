@@ -59,7 +59,9 @@ inline bool
 checkComplete(const nixlSpdkEngine &eng, nixlBackendReqH *h) {
     for (int i = 0; i < 1000; ++i) {
         nixl_status_t s = eng.checkXfer(h);
-        if (s == NIXL_SUCCESS) return true;
+        if (s == NIXL_SUCCESS) {
+            return true;
+        }
         if (s != NIXL_IN_PROG) {
             std::cerr << "checkXfer error status=" << s << "\n";
             return false;
@@ -74,10 +76,15 @@ checkComplete(const nixlSpdkEngine &eng, nixlBackendReqH *h) {
 // (SUCCESS/IN_PROG), and the op polled to SUCCESS. Not for the reject/mismatch
 // cases (which inspect prep/post/check statuses individually).
 inline bool
-doXfer(const nixlSpdkEngine &eng, nixl_xfer_op_t op, const nixl_meta_dlist_t &local,
-       const nixl_meta_dlist_t &remote, const std::string &agent) {
+doXfer(const nixlSpdkEngine &eng,
+       nixl_xfer_op_t op,
+       const nixl_meta_dlist_t &local,
+       const nixl_meta_dlist_t &remote,
+       const std::string &agent) {
     nixlBackendReqH *h = nullptr;
-    if (eng.prepXfer(op, local, remote, agent, h) != NIXL_SUCCESS) return false;
+    if (eng.prepXfer(op, local, remote, agent, h) != NIXL_SUCCESS) {
+        return false;
+    }
     nixl_status_t ps = eng.postXfer(op, local, remote, agent, h);
     bool ok = (ps == NIXL_SUCCESS || ps == NIXL_IN_PROG) && checkComplete(eng, h);
     eng.releaseReqH(h);
@@ -98,7 +105,9 @@ makeEngine(const std::string &arg, const char *agent, bool block) {
     } else {
         params["vfu_addr"] = arg;
     }
-    if (block) params["csi"] = "block";
+    if (block) {
+        params["csi"] = "block";
+    }
     params["init_env"] = "true";
 
     nixlBackendInitParams init{};
@@ -110,7 +119,9 @@ makeEngine(const std::string &arg, const char *agent, bool block) {
     init.enableTelemetry_ = false;
 
     auto eng = std::make_unique<nixlSpdkEngine>(&init);
-    if (eng->getInitErr()) return nullptr;
+    if (eng->getInitErr()) {
+        return nullptr;
+    }
     return eng;
 }
 
@@ -129,14 +140,26 @@ public:
             ptr_ = spdk_shim_dma_alloc(len_);
         }
     }
-    ~ValueBuf() {
-        if (kind_ == BufKind::Dma) spdk_shim_dma_free(ptr_);
-    }
-    ValueBuf(const ValueBuf &) = delete;
-    ValueBuf &operator=(const ValueBuf &) = delete;
 
-    bool valid() const { return ptr_ != nullptr; }
-    uint8_t *data() { return static_cast<uint8_t *>(ptr_); }
+    ~ValueBuf() {
+        if (kind_ == BufKind::Dma) {
+            spdk_shim_dma_free(ptr_);
+        }
+    }
+
+    ValueBuf(const ValueBuf &) = delete;
+    ValueBuf &
+    operator=(const ValueBuf &) = delete;
+
+    bool
+    valid() const {
+        return ptr_ != nullptr;
+    }
+
+    uint8_t *
+    data() {
+        return static_cast<uint8_t *>(ptr_);
+    }
 
 private:
     BufKind kind_;
@@ -152,8 +175,12 @@ private:
 // zero-copy datapath (dramIsDmaRegistered on both DRAM buffers). Exercises the
 // region-bounded SGL across sizes that span several 2 MiB DMA regions.
 inline bool
-storeRetrieveVerify(nixlSpdkEngine &eng, const std::string &agent, const std::string &key,
-                    size_t size, BufKind kind = BufKind::Heap, bool expect_direct = false) {
+storeRetrieveVerify(nixlSpdkEngine &eng,
+                    const std::string &agent,
+                    const std::string &key,
+                    size_t size,
+                    BufKind kind = BufKind::Heap,
+                    bool expect_direct = false) {
     ValueBuf src(kind, size), dst(kind, size);
     if (!src.valid() || !dst.valid()) {
         std::cerr << "FAIL: value buffer alloc(" << size << ") for round-trip\n";
@@ -181,22 +208,28 @@ storeRetrieveVerify(nixlSpdkEngine &eng, const std::string &agent, const std::st
             break;
         }
         // Zero-copy discriminator: SPDK-DMA buffers MUST take the direct datapath.
-        if (expect_direct && (!eng.dramIsDmaRegistered(src_md) || !eng.dramIsDmaRegistered(dst_md))) {
+        if (expect_direct &&
+            (!eng.dramIsDmaRegistered(src_md) || !eng.dramIsDmaRegistered(dst_md))) {
             std::cerr << "FAIL: expected zero-copy DMA path for SPDK-DMA buffers (size " << size
                       << ")\n";
             break;
         }
 
         nixl_meta_dlist_t local(DRAM_SEG);
-        local.addDesc(nixlMetaDesc(reinterpret_cast<uintptr_t>(src.data()), size, dram_dev, src_md));
+        local.addDesc(
+            nixlMetaDesc(reinterpret_cast<uintptr_t>(src.data()), size, dram_dev, src_md));
         nixl_meta_dlist_t remote(OBJ_SEG);
         remote.addDesc(nixlMetaDesc(0, size, key_dev, key_md));
         nixl_meta_dlist_t local_dst(DRAM_SEG);
         local_dst.addDesc(
             nixlMetaDesc(reinterpret_cast<uintptr_t>(dst.data()), size, dram_dev, dst_md));
 
-        if (!doXfer(eng, NIXL_WRITE, local, remote, agent)) break;    // KV Store
-        if (!doXfer(eng, NIXL_READ, local_dst, remote, agent)) break; // KV Retrieve
+        if (!doXfer(eng, NIXL_WRITE, local, remote, agent)) {
+            break; // KV Store
+        }
+        if (!doXfer(eng, NIXL_READ, local_dst, remote, agent)) {
+            break; // KV Retrieve
+        }
         ok = (std::memcmp(src.data(), dst.data(), size) == 0);
     } while (0);
 
@@ -212,8 +245,12 @@ storeRetrieveVerify(nixlSpdkEngine &eng, const std::string &agent, const std::st
 // compare. `kind`/`expect_direct` behave as in storeRetrieveVerify (Dma+direct
 // asserts the zero-copy block datapath).
 inline bool
-writeReadVerify(nixlSpdkEngine &eng, const std::string &agent, uint64_t lba, size_t size,
-                BufKind kind = BufKind::Heap, bool expect_direct = false) {
+writeReadVerify(nixlSpdkEngine &eng,
+                const std::string &agent,
+                uint64_t lba,
+                size_t size,
+                BufKind kind = BufKind::Heap,
+                bool expect_direct = false) {
     ValueBuf src(kind, size), dst(kind, size);
     if (!src.valid() || !dst.valid()) {
         std::cerr << "FAIL: value buffer alloc(" << size << ") for block round-trip\n";
@@ -241,22 +278,28 @@ writeReadVerify(nixlSpdkEngine &eng, const std::string &agent, uint64_t lba, siz
             std::cerr << "FAIL: registerMem failed for size " << size << "\n";
             break;
         }
-        if (expect_direct && (!eng.dramIsDmaRegistered(src_md) || !eng.dramIsDmaRegistered(dst_md))) {
+        if (expect_direct &&
+            (!eng.dramIsDmaRegistered(src_md) || !eng.dramIsDmaRegistered(dst_md))) {
             std::cerr << "FAIL: expected zero-copy DMA path for SPDK-DMA block buffers (size "
                       << size << ")\n";
             break;
         }
 
         nixl_meta_dlist_t local(DRAM_SEG);
-        local.addDesc(nixlMetaDesc(reinterpret_cast<uintptr_t>(src.data()), size, dram_dev, src_md));
+        local.addDesc(
+            nixlMetaDesc(reinterpret_cast<uintptr_t>(src.data()), size, dram_dev, src_md));
         nixl_meta_dlist_t remote(BLK_SEG);
         remote.addDesc(nixlMetaDesc(lba, size, blk_dev, blk_md));
         nixl_meta_dlist_t local_dst(DRAM_SEG);
         local_dst.addDesc(
             nixlMetaDesc(reinterpret_cast<uintptr_t>(dst.data()), size, dram_dev, dst_md));
 
-        if (!doXfer(eng, NIXL_WRITE, local, remote, agent)) break; // block write
-        if (!doXfer(eng, NIXL_READ, local_dst, remote, agent)) break; // block read
+        if (!doXfer(eng, NIXL_WRITE, local, remote, agent)) {
+            break; // block write
+        }
+        if (!doXfer(eng, NIXL_READ, local_dst, remote, agent)) {
+            break; // block read
+        }
         ok = (std::memcmp(src.data(), dst.data(), size) == 0);
     } while (0);
 

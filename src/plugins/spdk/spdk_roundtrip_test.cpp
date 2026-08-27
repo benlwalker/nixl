@@ -100,15 +100,15 @@ main(int argc, char **argv) {
 
     // Build meta dlists for the transfer.
     nixl_meta_dlist_t local(DRAM_SEG);
-    local.addDesc(nixlMetaDesc(
-        reinterpret_cast<uintptr_t>(src.data()), src.size(), dram_dev, dram_md));
+    local.addDesc(
+        nixlMetaDesc(reinterpret_cast<uintptr_t>(src.data()), src.size(), dram_dev, dram_md));
 
     nixl_meta_dlist_t remote(OBJ_SEG);
     remote.addDesc(nixlMetaDesc(0, src.size(), key_dev, key_md));
 
     nixl_meta_dlist_t local_dst(DRAM_SEG);
-    local_dst.addDesc(nixlMetaDesc(
-        reinterpret_cast<uintptr_t>(dst.data()), dst.size(), dram_dev, dram_md));
+    local_dst.addDesc(
+        nixlMetaDesc(reinterpret_cast<uintptr_t>(dst.data()), dst.size(), dram_dev, dram_md));
 
     // --- WRITE => KV Store ---
     if (!doXfer(eng, NIXL_WRITE, local, remote, agent)) {
@@ -166,8 +166,8 @@ main(int argc, char **argv) {
         nixl_status_t qs = eng.queryMem(q_hit, resp_hit);
         if (qs != NIXL_SUCCESS || resp_hit.size() != 1 || !resp_hit[0].has_value()) {
             std::cerr << "FAIL: QUERY on stored key '" << kv_key
-                      << "' did not report a hit (status=" << qs
-                      << ", n=" << resp_hit.size() << ")\n";
+                      << "' did not report a hit (status=" << qs << ", n=" << resp_hit.size()
+                      << ")\n";
             return 1;
         }
 
@@ -179,8 +179,8 @@ main(int argc, char **argv) {
         qs = eng.queryMem(q_miss, resp_miss);
         if (qs != NIXL_SUCCESS || resp_miss.size() != 1 || resp_miss[0].has_value()) {
             std::cerr << "FAIL: QUERY on absent key '" << absent_key
-                      << "' did not report a miss (status=" << qs
-                      << ", n=" << resp_miss.size() << ")\n";
+                      << "' did not report a miss (status=" << qs << ", n=" << resp_miss.size()
+                      << ")\n";
             return 1;
         }
         std::cout << "QUERY (KV Exist): stored key -> hit, absent key -> miss\n";
@@ -207,21 +207,21 @@ main(int argc, char **argv) {
         nixl_status_t ps = eng.postXfer(NIXL_READ, s_local, s_remote, agent, h);
         nixl_status_t cs = eng.checkXfer(h);
         if (ps != NIXL_ERR_MISMATCH || cs != NIXL_ERR_MISMATCH) {
-            std::cerr << "FAIL: short READ (" << short_len << " bytes) of a "
-                      << payload.size() << "-byte value did NOT report MISMATCH (post="
-                      << ps << " check=" << cs << ")\n";
+            std::cerr << "FAIL: short READ (" << short_len << " bytes) of a " << payload.size()
+                      << "-byte value did NOT report MISMATCH (post=" << ps << " check=" << cs
+                      << ")\n";
             eng.releaseReqH(h);
             return 1;
         }
         const size_t true_len = eng.getReqTrueLen(h, 0);
         eng.releaseReqH(h);
         if (true_len != payload.size()) {
-            std::cerr << "FAIL: short READ reported true length " << true_len
-                      << ", expected " << payload.size() << "\n";
+            std::cerr << "FAIL: short READ reported true length " << true_len << ", expected "
+                      << payload.size() << "\n";
             return 1;
         }
-        std::cout << "short READ (" << short_len << " bytes) reported true length "
-                  << true_len << " (no silent truncation)\n";
+        std::cout << "short READ (" << short_len << " bytes) reported true length " << true_len
+                  << " (no silent truncation)\n";
 
         // Resize to the reported true length and re-Retrieve => byte-exact.
         std::vector<uint8_t> resized_dst(true_len, 0);
@@ -253,6 +253,7 @@ main(int argc, char **argv) {
     // values this large (run_roundtrip.sh raises kvdev_mem --max-value-len).
     {
         const size_t MiB = 1024 * 1024;
+
         const struct {
             const char *key;
             size_t size;
@@ -261,6 +262,7 @@ main(int argc, char **argv) {
             {"nixl-large-8mib0", 8 * MiB},
             {"nixl-large-60mib", 60 * MiB},
         };
+
         for (const auto &c : cases) {
             if (!storeRetrieveVerify(eng, agent, c.key, c.size)) {
                 std::cerr << "FAIL: large-value round-trip failed for " << (c.size / MiB)
@@ -268,8 +270,8 @@ main(int argc, char **argv) {
                 return 1;
             }
             const size_t regions = (c.size + (2 * MiB - 1)) / (2 * MiB);
-            std::cout << "large-value round-trip OK: " << (c.size / MiB) << " MiB ("
-                      << regions << " x 2 MiB region(s), key '" << c.key << "')\n";
+            std::cout << "large-value round-trip OK: " << (c.size / MiB) << " MiB (" << regions
+                      << " x 2 MiB region(s), key '" << c.key << "')\n";
         }
     }
 
@@ -279,7 +281,7 @@ main(int argc, char **argv) {
     // a correctly-sized (multi-region SGL) re-Retrieve must be byte-exact.
     {
         const size_t MiB = 1024 * 1024;
-        const size_t big_len = 8 * MiB;   // 4 x 2 MiB regions
+        const size_t big_len = 8 * MiB; // 4 x 2 MiB regions
         const size_t small_len = 1 * MiB; // too small: forces auto-sizing
         const uint64_t dram_dev = 0, key_dev = 1;
         const std::string key = "nixl-lgautosz-01"; // 16 bytes
@@ -302,7 +304,8 @@ main(int argc, char **argv) {
         // Store the 8 MiB value.
         {
             nixl_meta_dlist_t l(DRAM_SEG);
-            l.addDesc(nixlMetaDesc(reinterpret_cast<uintptr_t>(big_src.data()), big_len, dram_dev, src_md));
+            l.addDesc(nixlMetaDesc(
+                reinterpret_cast<uintptr_t>(big_src.data()), big_len, dram_dev, src_md));
             nixl_meta_dlist_t r(OBJ_SEG);
             r.addDesc(nixlMetaDesc(0, big_len, key_dev, k_md));
             if (!doXfer(eng, NIXL_WRITE, l, r, agent)) {
@@ -316,7 +319,8 @@ main(int argc, char **argv) {
         // Retrieve into a 1 MiB buffer: must report MISMATCH + true length 8 MiB.
         {
             nixl_meta_dlist_t l(DRAM_SEG);
-            l.addDesc(nixlMetaDesc(reinterpret_cast<uintptr_t>(small_dst.data()), small_len, dram_dev, nullptr));
+            l.addDesc(nixlMetaDesc(
+                reinterpret_cast<uintptr_t>(small_dst.data()), small_len, dram_dev, nullptr));
             nixl_meta_dlist_t r(OBJ_SEG);
             r.addDesc(nixlMetaDesc(0, small_len, key_dev, k_md));
             nixlBackendReqH *h = nullptr;
@@ -336,15 +340,17 @@ main(int argc, char **argv) {
                 eng.deregisterMem(src_md);
                 return 1;
             }
-            std::cout << "large too-small READ (" << (small_len / MiB) << " MiB buf) reported true length "
-                      << (tl / MiB) << " MiB (no partial/striped copy)\n";
+            std::cout << "large too-small READ (" << (small_len / MiB)
+                      << " MiB buf) reported true length " << (tl / MiB)
+                      << " MiB (no partial/striped copy)\n";
         }
 
         // Resize to the true length and re-Retrieve => byte-exact.
         {
             std::vector<uint8_t> big_dst(big_len, 0);
             nixl_meta_dlist_t l(DRAM_SEG);
-            l.addDesc(nixlMetaDesc(reinterpret_cast<uintptr_t>(big_dst.data()), big_len, dram_dev, nullptr));
+            l.addDesc(nixlMetaDesc(
+                reinterpret_cast<uintptr_t>(big_dst.data()), big_len, dram_dev, nullptr));
             nixl_meta_dlist_t r(OBJ_SEG);
             r.addDesc(nixlMetaDesc(0, big_len, key_dev, k_md));
             if (!doXfer(eng, NIXL_READ, l, r, agent)) {
@@ -372,8 +378,7 @@ main(int argc, char **argv) {
     // buffer, so a small backing buffer with an oversize descriptor length is
     // sufficient (and proves the reject is not a partial/striped transfer).
     {
-        const size_t oversize =
-            static_cast<size_t>(SPDK_SHIM_MAX_VALUE_LEN) + 4 * 1024 * 1024;
+        const size_t oversize = static_cast<size_t>(SPDK_SHIM_MAX_VALUE_LEN) + 4 * 1024 * 1024;
         std::vector<uint8_t> tiny(4096, 0);
         const uint64_t dram_dev = 0, key_dev = 1;
         const std::string big_key = "nixl-oversize-01"; // 16 bytes, opaque
@@ -385,8 +390,8 @@ main(int argc, char **argv) {
             return 1;
         }
         nixl_meta_dlist_t local(DRAM_SEG);
-        local.addDesc(nixlMetaDesc(
-            reinterpret_cast<uintptr_t>(tiny.data()), oversize, dram_dev, nullptr));
+        local.addDesc(
+            nixlMetaDesc(reinterpret_cast<uintptr_t>(tiny.data()), oversize, dram_dev, nullptr));
         nixl_meta_dlist_t remote(OBJ_SEG);
         remote.addDesc(nixlMetaDesc(0, oversize, key_dev, key_md2));
 
@@ -415,6 +420,7 @@ main(int argc, char **argv) {
     // multi-region large value (zero-copy across the region-bounded SGL).
     {
         const size_t MiB = 1024 * 1024;
+
         const struct {
             const char *key;
             size_t size;
@@ -422,15 +428,17 @@ main(int argc, char **argv) {
             {"nixl-zerocopy-01", 4096},
             {"nixl-zerocopy-8m", 8 * MiB}, // 4 x 2 MiB regions, zero-copy large value
         };
+
         for (const auto &c : zc) {
-            if (!storeRetrieveVerify(eng, agent, c.key, c.size, BufKind::Dma, /*expect_direct=*/true)) {
-                std::cerr << "FAIL: zero-copy round-trip failed (key '" << c.key
-                          << "', size " << c.size << ")\n";
+            if (!storeRetrieveVerify(
+                    eng, agent, c.key, c.size, BufKind::Dma, /*expect_direct=*/true)) {
+                std::cerr << "FAIL: zero-copy round-trip failed (key '" << c.key << "', size "
+                          << c.size << ")\n";
                 return 1;
             }
             std::cout << "zero-copy round-trip OK: " << c.size
-                      << " bytes, device DMA'd into the caller buffer (no staging, key '"
-                      << c.key << "')\n";
+                      << " bytes, device DMA'd into the caller buffer (no staging, key '" << c.key
+                      << "')\n";
         }
     }
 
@@ -476,7 +484,9 @@ main(int argc, char **argv) {
             return 1;
         }
         auto *bb = static_cast<uint8_t *>(buf);
-        for (size_t i = 0; i < sz; ++i) bb[i] = static_cast<uint8_t>(i * 31u + 7u);
+        for (size_t i = 0; i < sz; ++i) {
+            bb[i] = static_cast<uint8_t>(i * 31u + 7u);
+        }
         std::vector<uint8_t> expect(bb, bb + sz);
         const uint64_t dram_dev = 0, key_dev = 1;
         const std::string key = "nixl-rollback-01"; // 16 bytes
@@ -500,7 +510,9 @@ main(int argc, char **argv) {
             remote.addDesc(nixlMetaDesc(0, sz, key_dev, key_md));
             bool round_ok = doXfer(eng, NIXL_WRITE, local, remote, agent);
             std::memset(buf, 0, sz);
-            if (round_ok) round_ok = doXfer(eng, NIXL_READ, local, remote, agent);
+            if (round_ok) {
+                round_ok = doXfer(eng, NIXL_READ, local, remote, agent);
+            }
             rc = (round_ok && std::memcmp(buf, expect.data(), sz) == 0) ? 0 : 2;
         }
         eng.deregisterMem(key_md);
@@ -523,9 +535,15 @@ main(int argc, char **argv) {
         const nixl_mem_list_t mems = eng.getSupportedMems();
         bool has_obj = false, has_blk = false, has_dram = false;
         for (nixl_mem_t m : mems) {
-            if (m == OBJ_SEG) has_obj = true;
-            if (m == BLK_SEG) has_blk = true;
-            if (m == DRAM_SEG) has_dram = true;
+            if (m == OBJ_SEG) {
+                has_obj = true;
+            }
+            if (m == BLK_SEG) {
+                has_blk = true;
+            }
+            if (m == DRAM_SEG) {
+                has_dram = true;
+            }
         }
         if (has_blk || !has_obj || !has_dram) {
             std::cerr << "FAIL: KV-mode getSupportedMems must be {DRAM_SEG, OBJ_SEG} "
@@ -578,13 +596,19 @@ main(int argc, char **argv) {
         bool skipped = true;
         if (base != nullptr) {
             void *tail_at = static_cast<void *>(static_cast<uint8_t *>(base) + region);
-            void *tail = mmap(tail_at, region, PROT_READ | PROT_WRITE,
-                              MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+            void *tail = mmap(tail_at,
+                              region,
+                              PROT_READ | PROT_WRITE,
+                              MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+                              -1,
+                              0);
             if (tail == tail_at) {
                 skipped = false;
                 const size_t sz = 2 * region; // fd-backed base + anonymous tail
                 auto *bb = static_cast<uint8_t *>(base);
-                for (size_t i = 0; i < sz; ++i) bb[i] = static_cast<uint8_t>(i * 131u + 17u);
+                for (size_t i = 0; i < sz; ++i) {
+                    bb[i] = static_cast<uint8_t>(i * 131u + 17u);
+                }
                 std::vector<uint8_t> expect(bb, bb + sz);
                 const uint64_t dram_dev = 0, key_dev = 1;
                 const std::string key = "nixl-partial-001"; // 16 bytes, opaque
@@ -605,12 +629,15 @@ main(int argc, char **argv) {
                     // Staged path: a byte-exact WRITE then READ round-trip proves the
                     // fallback moves the FULL span correctly (no silent corruption).
                     nixl_meta_dlist_t local(DRAM_SEG);
-                    local.addDesc(nixlMetaDesc(reinterpret_cast<uintptr_t>(base), sz, dram_dev, src_md));
+                    local.addDesc(
+                        nixlMetaDesc(reinterpret_cast<uintptr_t>(base), sz, dram_dev, src_md));
                     nixl_meta_dlist_t remote(OBJ_SEG);
                     remote.addDesc(nixlMetaDesc(0, sz, key_dev, key_md));
                     bool round_ok = doXfer(eng, NIXL_WRITE, local, remote, agent);
                     std::memset(base, 0, sz);
-                    if (round_ok) round_ok = doXfer(eng, NIXL_READ, local, remote, agent);
+                    if (round_ok) {
+                        round_ok = doXfer(eng, NIXL_READ, local, remote, agent);
+                    }
                     rc = (round_ok && std::memcmp(base, expect.data(), sz) == 0) ? 0 : 2;
                 }
                 eng.deregisterMem(key_md);
@@ -648,7 +675,7 @@ main(int argc, char **argv) {
     {
         const uint64_t dram_dev = 0, key_dev = 1;
         const std::string key_good = "nixl-midlist-a00"; // 16 bytes, never stored
-        const std::string key_bad = "nixl-midlist-b00";  // 16 bytes, never stored
+        const std::string key_bad = "nixl-midlist-b00"; // 16 bytes, never stored
         const size_t good_len = 64;
 
         std::vector<uint8_t> buf0(good_len), buf1(good_len);
@@ -676,11 +703,13 @@ main(int argc, char **argv) {
         }
 
         nixl_meta_dlist_t l(DRAM_SEG);
-        l.addDesc(nixlMetaDesc(reinterpret_cast<uintptr_t>(buf0.data()), good_len, dram_dev, s0_md));
-        l.addDesc(nixlMetaDesc(reinterpret_cast<uintptr_t>(buf1.data()), good_len, dram_dev, s1_md));
+        l.addDesc(
+            nixlMetaDesc(reinterpret_cast<uintptr_t>(buf0.data()), good_len, dram_dev, s0_md));
+        l.addDesc(
+            nixlMetaDesc(reinterpret_cast<uintptr_t>(buf1.data()), good_len, dram_dev, s1_md));
         nixl_meta_dlist_t r(OBJ_SEG);
-        r.addDesc(nixlMetaDesc(0, good_len, key_dev, k0_md));      // desc0: valid
-        r.addDesc(nixlMetaDesc(0, good_len * 2, key_dev, k1_md));  // desc1: len mismatch
+        r.addDesc(nixlMetaDesc(0, good_len, key_dev, k0_md)); // desc0: valid
+        r.addDesc(nixlMetaDesc(0, good_len * 2, key_dev, k1_md)); // desc1: len mismatch
 
         nixlBackendReqH *h = nullptr;
         nixl_status_t pp = eng.prepXfer(NIXL_WRITE, l, r, agent, h);
@@ -716,8 +745,8 @@ main(int argc, char **argv) {
         }
         if (resp[0].has_value() || resp[1].has_value()) {
             std::cerr << "FAIL: mid-list partial mutation -- a value was Stored despite "
-                         "prepXfer rejecting the list (desc0 present=" << resp[0].has_value()
-                      << ", desc1 present=" << resp[1].has_value() << ")\n";
+                         "prepXfer rejecting the list (desc0 present="
+                      << resp[0].has_value() << ", desc1 present=" << resp[1].has_value() << ")\n";
             return 1;
         }
         std::cout << "mid-list partial guard OK: a 2-desc WRITE with one bad descriptor "

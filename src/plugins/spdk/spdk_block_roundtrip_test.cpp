@@ -76,7 +76,10 @@ namespace {
 // any DMA is staged, which also proves the reject is not a partial/striped
 // transfer. Returns true iff the reject matched `expected`.
 bool
-expectReject(nixlSpdkEngine &eng, const std::string &agent, uint64_t lba, size_t size,
+expectReject(nixlSpdkEngine &eng,
+             const std::string &agent,
+             uint64_t lba,
+             size_t size,
              nixl_status_t expected) {
     std::vector<uint8_t> tiny(4096, 0);
     const uint64_t dram_dev = 0, blk_dev = 1;
@@ -113,8 +116,7 @@ expectReject(nixlSpdkEngine &eng, const std::string &agent, uint64_t lba, size_t
         first_fail = cs;
     } else {
         std::cerr << "FAIL: expected reject " << expected
-                  << " but prep/post/check all succeeded (lba=" << lba << " size=" << size
-                  << ")\n";
+                  << " but prep/post/check all succeeded (lba=" << lba << " size=" << size << ")\n";
         return false;
     }
     if (first_fail != expected) {
@@ -131,7 +133,10 @@ expectReject(nixlSpdkEngine &eng, const std::string &agent, uint64_t lba, size_t
 // (sector-aligned, in-range, single-range) length. Returns true on success.
 // Drives writes/reads independently so a caller can address distinct LBAs.
 bool
-blockOp(nixlSpdkEngine &eng, const std::string &agent, nixl_xfer_op_t op, uint64_t lba,
+blockOp(nixlSpdkEngine &eng,
+        const std::string &agent,
+        nixl_xfer_op_t op,
+        uint64_t lba,
         std::vector<uint8_t> &data) {
     const size_t size = data.size();
     const uint64_t dram_dev = 0, blk_dev = 1;
@@ -185,16 +190,16 @@ main(int argc, char **argv) {
     // corrupt the byte-for-byte compare.
     {
         const size_t KiB = 1024, MiB = 1024 * 1024;
-        const size_t sizes[] = {4 * KiB, 8 * KiB, 64 * KiB, 256 * KiB, 1 * MiB,
-                                2 * MiB, 8 * MiB, 60 * MiB};
+        const size_t sizes[] = {
+            4 * KiB, 8 * KiB, 64 * KiB, 256 * KiB, 1 * MiB, 2 * MiB, 8 * MiB, 60 * MiB};
         for (size_t sz : sizes) {
             if (!writeReadVerify(eng, agent, /*lba=*/0, sz)) {
                 std::cerr << "FAIL: block round-trip failed at LBA 0 for " << sz << " bytes\n";
                 return 1;
             }
             const size_t regions = (sz + (2 * MiB - 1)) / (2 * MiB);
-            std::cout << "block round-trip OK: " << sz << " bytes at LBA 0 ("
-                      << regions << " x 2 MiB region(s))\n";
+            std::cout << "block round-trip OK: " << sz << " bytes at LBA 0 (" << regions
+                      << " x 2 MiB region(s))\n";
         }
     }
 
@@ -215,21 +220,22 @@ main(int argc, char **argv) {
     // multi-region (zero-copy over the region-bounded SGL) transfer byte-exact.
     {
         const size_t MiB = 1024 * 1024;
+
         const struct {
             uint64_t lba;
             size_t size;
         } zc[] = {
-            {0, 4096},
-            {0, 8 * MiB}, // 4 x 2 MiB regions, zero-copy large block transfer
+            {0, 4096}, {0, 8 * MiB}, // 4 x 2 MiB regions, zero-copy large block transfer
         };
+
         for (const auto &c : zc) {
             if (!writeReadVerify(eng, agent, c.lba, c.size, BufKind::Dma, /*expect_direct=*/true)) {
                 std::cerr << "FAIL: zero-copy block round-trip failed (" << c.size
                           << " bytes at LBA " << c.lba << ")\n";
                 return 1;
             }
-            std::cout << "zero-copy block round-trip OK: " << c.size
-                      << " bytes at LBA " << c.lba << " (device DMA'd caller buffer, no staging)\n";
+            std::cout << "zero-copy block round-trip OK: " << c.size << " bytes at LBA " << c.lba
+                      << " (device DMA'd caller buffer, no staging)\n";
         }
     }
 
@@ -238,8 +244,8 @@ main(int argc, char **argv) {
     // datapath that ignores remote.addr (e.g. always addresses LBA 0) collapses
     // both writes/reads onto one range and fails this. ---
     {
-        const size_t sz = 4096;                 // 8 sectors (512) or 1 sector (4096)
-        const uint64_t lba_a = 0, lba_b = 16;   // disjoint on either sector size
+        const size_t sz = 4096; // 8 sectors (512) or 1 sector (4096)
+        const uint64_t lba_a = 0, lba_b = 16; // disjoint on either sector size
         std::vector<uint8_t> pat_a(sz), pat_b(sz);
         for (size_t i = 0; i < sz; ++i) {
             pat_a[i] = static_cast<uint8_t>(0xA0 ^ (i * 31u));
@@ -287,15 +293,14 @@ main(int argc, char **argv) {
     // which cannot see a symmetric (write==read) intra-transfer region permutation.
     {
         const size_t MiB = 1024 * 1024;
-        const size_t region = 2 * MiB;    // one region-bounded SGL segment
-        const size_t regions = 4;         // 8 MiB total = 4 regions
+        const size_t region = 2 * MiB; // one region-bounded SGL segment
+        const size_t regions = 4; // 8 MiB total = 4 regions
         const size_t total = regions * region;
 
         // Map a region's byte offset to its LBA via the namespace sector size.
         const uint32_t sector = eng.blockSectorSize();
         if (sector == 0 || (region % sector) != 0) {
-            std::cerr << "FAIL: bad block sector size " << sector
-                      << " for region-scatter test\n";
+            std::cerr << "FAIL: bad block sector size " << sector << " for region-scatter test\n";
             return 1;
         }
         const uint64_t lba_per_region = region / sector;
@@ -304,8 +309,8 @@ main(int argc, char **argv) {
         // mis-placed region is detectable by content alone.
         auto fillRegion = [](std::vector<uint8_t> &buf, size_t off, size_t len, size_t k) {
             for (size_t i = 0; i < len; ++i) {
-                buf[off + i] = static_cast<uint8_t>(
-                    (0x11u * (k + 1)) ^ ((i * 2246822519u + k * 2654435761u) >> 15));
+                buf[off + i] = static_cast<uint8_t>((0x11u * (k + 1)) ^
+                                                    ((i * 2246822519u + k * 2654435761u) >> 15));
             }
         };
         std::vector<uint8_t> big(total, 0);
@@ -342,8 +347,8 @@ main(int argc, char **argv) {
             std::vector<uint8_t> rk(region, 0);
             const uint64_t lba = static_cast<uint64_t>(k) * lba_per_region;
             if (!blockOp(eng, agent, NIXL_READ, lba, rk)) {
-                std::cerr << "FAIL: independent region READ failed (region " << k
-                          << ", LBA " << lba << ")\n";
+                std::cerr << "FAIL: independent region READ failed (region " << k << ", LBA " << lba
+                          << ")\n";
                 return 1;
             }
             if (rk != markers[k]) {
@@ -355,9 +360,8 @@ main(int argc, char **argv) {
             }
         }
         std::cout << "independent region-scatter OK: 8 MiB (4 x 2 MiB) WRITE at LBA 0, "
-                  << "each region read back independently at its own LBA (sector="
-                  << sector << ", " << lba_per_region
-                  << " LBAs/region) returned its own distinct marker\n";
+                  << "each region read back independently at its own LBA (sector=" << sector << ", "
+                  << lba_per_region << " LBAs/region) returned its own distinct marker\n";
     }
 
     // --- Validation guards (each must be REJECTED with the SPECIFIC status
@@ -375,15 +379,15 @@ main(int argc, char **argv) {
         // transfer must be REJECTED, NOT split. A multiple of 4096 so it clears
         // alignment and is caught by the single-op bound guard, before any DMA is
         // staged (proving the reject is not a partial/striped transfer).
-        const size_t oversize =
-            static_cast<size_t>(SPDK_SHIM_MAX_VALUE_LEN) + 4 * 1024 * 1024;
+        const size_t oversize = static_cast<size_t>(SPDK_SHIM_MAX_VALUE_LEN) + 4 * 1024 * 1024;
         if (!expectReject(eng, agent, /*lba=*/0, oversize, NIXL_ERR_INVALID_PARAM)) {
             std::cerr << "FAIL: over-single-op-bound length (" << oversize << " B) reject\n";
             return 1;
         }
-        std::cout << "oversize length (" << (oversize / (1024 * 1024)) << " MiB > "
-                  << (SPDK_SHIM_MAX_VALUE_LEN / (1024 * 1024))
-                  << " MiB single-op bound) correctly rejected (NIXL_ERR_INVALID_PARAM, not split)\n";
+        std::cout
+            << "oversize length (" << (oversize / (1024 * 1024)) << " MiB > "
+            << (SPDK_SHIM_MAX_VALUE_LEN / (1024 * 1024))
+            << " MiB single-op bound) correctly rejected (NIXL_ERR_INVALID_PARAM, not split)\n";
 
         // LBA range past the namespace capacity (well beyond any malloc bdev here).
         const uint64_t far_lba = 1ull << 40;
@@ -419,9 +423,15 @@ main(int argc, char **argv) {
         const nixl_mem_list_t mems = eng.getSupportedMems();
         bool has_obj = false, has_blk = false, has_dram = false;
         for (nixl_mem_t m : mems) {
-            if (m == OBJ_SEG) has_obj = true;
-            if (m == BLK_SEG) has_blk = true;
-            if (m == DRAM_SEG) has_dram = true;
+            if (m == OBJ_SEG) {
+                has_obj = true;
+            }
+            if (m == BLK_SEG) {
+                has_blk = true;
+            }
+            if (m == DRAM_SEG) {
+                has_dram = true;
+            }
         }
         if (has_obj || !has_blk || !has_dram) {
             std::cerr << "FAIL: block-mode getSupportedMems must be {DRAM_SEG, BLK_SEG} "
@@ -465,7 +475,8 @@ main(int argc, char **argv) {
             return 1;
         }
         nixl_meta_dlist_t local(DRAM_SEG);
-        local.addDesc(nixlMetaDesc(reinterpret_cast<uintptr_t>(buf.data()), buf.size(), 0, dram_md));
+        local.addDesc(
+            nixlMetaDesc(reinterpret_cast<uintptr_t>(buf.data()), buf.size(), 0, dram_md));
         nixl_meta_dlist_t remote(OBJ_SEG);
         remote.addDesc(nixlMetaDesc(0, buf.size(), 1, nullptr));
 
@@ -480,13 +491,11 @@ main(int argc, char **argv) {
         eng.deregisterMem(dram_md);
         // The FIRST stage that did not succeed carries the reject reason; refusal
         // at prep means post/check never ran (no device op).
-        const nixl_status_t first_fail = (pp != NIXL_SUCCESS) ? pp
-                                       : (ps != NIXL_SUCCESS) ? ps
-                                                              : cs;
+        const nixl_status_t first_fail = (pp != NIXL_SUCCESS) ? pp : (ps != NIXL_SUCCESS) ? ps : cs;
         if (first_fail != NIXL_ERR_NOT_SUPPORTED) {
             std::cerr << "FAIL: OBJ_SEG on a block engine was not refused with "
-                         "NIXL_ERR_NOT_SUPPORTED before any device op (prep=" << pp
-                      << " post=" << ps << " check=" << cs << ")\n";
+                         "NIXL_ERR_NOT_SUPPORTED before any device op (prep="
+                      << pp << " post=" << ps << " check=" << cs << ")\n";
             return 1;
         }
         std::cout << "cross-mode guard OK: block-mode engine refuses OBJ_SEG at "

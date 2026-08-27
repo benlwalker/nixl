@@ -36,6 +36,7 @@ public:
     explicit nixlSpdkMetadata(std::vector<uint8_t> key)
         : nixlBackendMD(true),
           key(std::move(key)) {}
+
     ~nixlSpdkMetadata() override = default;
 
     std::vector<uint8_t> key;
@@ -58,6 +59,7 @@ public:
           len(len),
           dma_registered(dma_registered),
           owns_registration(owns_registration) {}
+
     ~nixlSpdkDramMD() override = default;
 
     void *base = nullptr;
@@ -122,7 +124,9 @@ std::string
 toLower(const std::string &v) {
     std::string s;
     s.reserve(v.size());
-    for (char c : v) s.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    for (char c : v) {
+        s.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
     return s;
 }
 
@@ -149,7 +153,9 @@ nixlSpdkEngine::nixlSpdkEngine(const nixlBackendInitParams *init_params)
     if (getInitParam("transport_id", transport_id) != NIXL_SUCCESS || transport_id.empty()) {
         std::string vfu_addr;
         for (const char *k : {"vfu_addr", "socket", "vfio_user_path"}) {
-            if (getInitParam(k, vfu_addr) == NIXL_SUCCESS && !vfu_addr.empty()) break;
+            if (getInitParam(k, vfu_addr) == NIXL_SUCCESS && !vfu_addr.empty()) {
+                break;
+            }
             vfu_addr.clear();
         }
         if (!vfu_addr.empty()) {
@@ -192,7 +198,9 @@ nixlSpdkEngine::nixlSpdkEngine(const nixlBackendInitParams *init_params)
     spdk_shim_ns_kind ns_kind = SPDK_SHIM_NS_KIND_KV;
     std::string ns_kind_str;
     for (const char *k : {"csi", "ns_kind", "mode"}) {
-        if (getInitParam(k, ns_kind_str) == NIXL_SUCCESS && !ns_kind_str.empty()) break;
+        if (getInitParam(k, ns_kind_str) == NIXL_SUCCESS && !ns_kind_str.empty()) {
+            break;
+        }
         ns_kind_str.clear();
     }
     if (!ns_kind_str.empty()) {
@@ -202,8 +210,7 @@ nixlSpdkEngine::nixlSpdkEngine(const nixlBackendInitParams *init_params)
         } else if (s == "kv") {
             ns_kind = SPDK_SHIM_NS_KIND_KV;
         } else {
-            NIXL_WARN << "SPDK: unknown namespace kind '" << ns_kind_str
-                      << "', defaulting to kv";
+            NIXL_WARN << "SPDK: unknown namespace kind '" << ns_kind_str << "', defaulting to kv";
         }
     }
     blockMode_ = (ns_kind == SPDK_SHIM_NS_KIND_BLOCK);
@@ -226,7 +233,8 @@ nixlSpdkEngine::nixlSpdkEngine(const nixlBackendInitParams *init_params)
             // cleanly here instead. Full metadata/PI support is out of scope.
             NIXL_ERROR << "SPDK: namespace on '" << transport_id
                        << "' carries per-LBA metadata (extended-LBA/DIF/DIX), which the "
-                          "block datapath does not support; refusing (rc=" << rc << ")";
+                          "block datapath does not support; refusing (rc="
+                       << rc << ")";
         } else {
             NIXL_ERROR << "SPDK: spdk_shim_open(" << transport_id << ") failed: rc=" << rc;
         }
@@ -251,14 +259,14 @@ nixlSpdkEngine::nixlSpdkEngine(const nixlBackendInitParams *init_params)
     uint32_t shim_kvkml = spdk_shim_max_key_len(shim_);
     if (shim_kvkml == 0) {
         NIXL_WARN << "SPDK: namespace advertised kvkml=0 (no key-length limit); "
-                     "using default max key length " << static_cast<unsigned>(kMaxKeyLen);
+                     "using default max key length "
+                  << static_cast<unsigned>(kMaxKeyLen);
         shim_kvkml = kMaxKeyLen;
     }
     maxKeyLen_ = static_cast<uint8_t>(std::min<uint32_t>(kMaxKeyLen, shim_kvkml));
 
     NIXL_INFO << "SPDK: opened SPDK KV shim on '" << transport_id << "'"
-              << " (init_env=" << (init_env ? "true" : "false")
-              << ", max_key=" << shim_kvkml
+              << " (init_env=" << (init_env ? "true" : "false") << ", max_key=" << shim_kvkml
               << ", effective_max_key=" << static_cast<unsigned>(maxKeyLen_)
               << ", max_value=" << spdk_shim_max_value_len(shim_) << ")";
 }
@@ -291,14 +299,15 @@ nixlSpdkEngine::getSupportedMems() const {
 
 nixl_status_t
 nixlSpdkEngine::registerMem(const nixlBlobDesc &mem,
-                              const nixl_mem_t &nixl_mem,
-                              nixlBackendMD *&out) {
+                            const nixl_mem_t &nixl_mem,
+                            nixlBackendMD *&out) {
     // Serialize the shim's DMA-registration (spdk_shim_mem_register on the
     // DRAM_SEG path, which mutates the shared SPDK memory map and probes the
     // qpair's DMA reachability) against a concurrent postXfer/queryMem.
     NIXL_LOCK_GUARD(shim_lock_);
-    if (nixl_mem != DRAM_SEG && nixl_mem != OBJ_SEG && nixl_mem != BLK_SEG)
+    if (nixl_mem != DRAM_SEG && nixl_mem != OBJ_SEG && nixl_mem != BLK_SEG) {
         return NIXL_ERR_NOT_SUPPORTED;
+    }
 
     // Cross-mode guard: the remote op-set must match the bound namespace kind. A
     // block-bound engine must refuse OBJ_SEG (KV) and a KV-bound engine must
@@ -346,8 +355,10 @@ nixlSpdkEngine::registerMem(const nixlBlobDesc &mem,
         // its releasing MD (no leak if the allocation throws).
         void *base = reinterpret_cast<void *>(mem.addr);
         const size_t len = mem.len;
-        auto *md = new nixlSpdkDramMD(base, len, /*dma_registered=*/false,
-                                        /*owns_registration=*/false);
+        auto *md = new nixlSpdkDramMD(base,
+                                      len,
+                                      /*dma_registered=*/false,
+                                      /*owns_registration=*/false);
         if (shim_ != nullptr && base != nullptr && len != 0) {
             int rc = spdk_shim_mem_register(shim_, base, len);
             if (rc >= 0) {
@@ -391,11 +402,11 @@ nixlSpdkEngine::deregisterMem(nixlBackendMD *meta) {
 
 nixl_status_t
 nixlSpdkEngine::prepXfer(const nixl_xfer_op_t &operation,
-                           const nixl_meta_dlist_t &local,
-                           const nixl_meta_dlist_t &remote,
-                           const std::string &remote_agent,
-                           nixlBackendReqH *&handle,
-                           const nixl_opt_b_args_t *opt_args) const {
+                         const nixl_meta_dlist_t &local,
+                         const nixl_meta_dlist_t &remote,
+                         const std::string &remote_agent,
+                         nixlBackendReqH *&handle,
+                         const nixl_opt_b_args_t *opt_args) const {
     if (operation != NIXL_WRITE && operation != NIXL_READ) {
         NIXL_ERROR << "SPDK: invalid operation " << operation;
         return NIXL_ERR_INVALID_PARAM;
@@ -443,7 +454,9 @@ nixlSpdkEngine::prepXfer(const nixl_xfer_op_t &operation,
             uint64_t lba = 0;
             uint32_t nlba = 0;
             nixl_status_t vs = computeBlockRange(local[i], remote[i], lba, nlba);
-            if (vs != NIXL_SUCCESS) return vs;
+            if (vs != NIXL_SUCCESS) {
+                return vs;
+            }
             ranges[i].lba = lba;
             ranges[i].nlba = nlba;
         }
@@ -466,8 +479,8 @@ nixlSpdkEngine::prepXfer(const nixl_xfer_op_t &operation,
         // A local/remote length mismatch means the caller's view of the value
         // size disagrees; fail rather than Store/Retrieve a different byte count.
         if (local_desc.len != remote_desc.len) {
-            NIXL_ERROR << "SPDK: descriptor " << i << " length mismatch: local="
-                       << local_desc.len << " remote=" << remote_desc.len;
+            NIXL_ERROR << "SPDK: descriptor " << i << " length mismatch: local=" << local_desc.len
+                       << " remote=" << remote_desc.len;
             return NIXL_ERR_INVALID_PARAM;
         }
         // NO striping: a value past the single-op region-bounded SGL bound is
@@ -483,8 +496,7 @@ nixlSpdkEngine::prepXfer(const nixl_xfer_op_t &operation,
         // still within [1, maxKeyLen_] so postXfer can take it as-is.
         auto *md = static_cast<nixlSpdkMetadata *>(remote_desc.metadataP);
         if (!md) {
-            NIXL_ERROR << "SPDK: remote descriptor " << i
-                       << " has no registered KV-key metadata";
+            NIXL_ERROR << "SPDK: remote descriptor " << i << " has no registered KV-key metadata";
             return NIXL_ERR_INVALID_PARAM;
         }
         if (md->key.empty() || md->key.size() > maxKeyLen_) {
@@ -500,11 +512,11 @@ nixlSpdkEngine::prepXfer(const nixl_xfer_op_t &operation,
 
 nixl_status_t
 nixlSpdkEngine::postXfer(const nixl_xfer_op_t &operation,
-                           const nixl_meta_dlist_t &local,
-                           const nixl_meta_dlist_t &remote,
-                           const std::string &remote_agent,
-                           nixlBackendReqH *&handle,
-                           const nixl_opt_b_args_t *opt_args) const {
+                         const nixl_meta_dlist_t &local,
+                         const nixl_meta_dlist_t &remote,
+                         const std::string &remote_agent,
+                         nixlBackendReqH *&handle,
+                         const nixl_opt_b_args_t *opt_args) const {
     if (!handle) {
         NIXL_ERROR << "SPDK: transfer request handle is null";
         return NIXL_ERR_INVALID_PARAM;
@@ -562,8 +574,7 @@ nixlSpdkEngine::postXfer(const nixl_xfer_op_t &operation,
         // it holds for every descriptor), not a mid-list validation reject.
         auto *md = static_cast<nixlSpdkMetadata *>(remote_desc.metadataP);
         if (!md) {
-            NIXL_ERROR << "SPDK: remote descriptor " << i
-                       << " has no registered KV-key metadata";
+            NIXL_ERROR << "SPDK: remote descriptor " << i << " has no registered KV-key metadata";
             req_h->status = NIXL_ERR_INVALID_PARAM;
             return NIXL_ERR_INVALID_PARAM;
         }
@@ -613,18 +624,26 @@ nixlSpdkEngine::postXfer(const nixl_xfer_op_t &operation,
                     NIXL_ERROR << "SPDK: DMA buffer alloc failed (" << data_len << " bytes)";
                     return -ENOMEM;
                 }
-                if (operation == NIXL_WRITE) std::memcpy(io_buf, data_ptr, data_len);
+                if (operation == NIXL_WRITE) {
+                    std::memcpy(io_buf, data_ptr, data_len);
+                }
             }
             spdk_shim_op_init(&slot.op);
             slot.op.staging = use_direct ? nullptr : io_buf;
             slot.staged = !use_direct;
             const int r = (operation == NIXL_WRITE) ?
-                spdk_shim_store(shim_, &slot.op, key.data(),
+                spdk_shim_store(shim_,
+                                &slot.op,
+                                key.data(),
+                                static_cast<uint8_t>(key.size()),
+                                io_buf,
+                                static_cast<uint32_t>(data_len)) :
+                spdk_shim_retrieve(shim_,
+                                   &slot.op,
+                                   key.data(),
                                    static_cast<uint8_t>(key.size()),
-                                   io_buf, static_cast<uint32_t>(data_len)) :
-                spdk_shim_retrieve(shim_, &slot.op, key.data(),
-                                      static_cast<uint8_t>(key.size()),
-                                      io_buf, static_cast<uint32_t>(data_len));
+                                   io_buf,
+                                   static_cast<uint32_t>(data_len));
             if (r != 0 && !use_direct) {
                 spdk_shim_dma_free(io_buf);
                 slot.op.staging = nullptr;
@@ -634,8 +653,8 @@ nixlSpdkEngine::postXfer(const nixl_xfer_op_t &operation,
 
         int rc = submit_kv(direct);
         if (direct && rc < 0) {
-            NIXL_WARN << "SPDK: direct submit failed for descriptor " << i
-                      << " (rc=" << rc << "); demoting to a staged copy";
+            NIXL_WARN << "SPDK: direct submit failed for descriptor " << i << " (rc=" << rc
+                      << "); demoting to a staged copy";
             rc = submit_kv(false);
         }
         if (rc != 0) {
@@ -654,9 +673,9 @@ nixlSpdkEngine::postXfer(const nixl_xfer_op_t &operation,
 
 nixl_status_t
 nixlSpdkEngine::computeBlockRange(const nixlMetaDesc &local_desc,
-                                   const nixlMetaDesc &remote_desc,
-                                   uint64_t &lba_out,
-                                   uint32_t &nlba_out) const {
+                                  const nixlMetaDesc &remote_desc,
+                                  uint64_t &lba_out,
+                                  uint32_t &nlba_out) const {
     lba_out = 0;
     nlba_out = 0;
 
@@ -685,8 +704,8 @@ nixlSpdkEngine::computeBlockRange(const nixlMetaDesc &local_desc,
     // Sector alignment: a block op moves whole sectors, so the byte length must
     // be a multiple of the namespace sector size (KV had no alignment rule).
     if ((len % sector) != 0) {
-        NIXL_ERROR << "SPDK: block length " << len
-                   << " is not a multiple of the sector size " << sector;
+        NIXL_ERROR << "SPDK: block length " << len << " is not a multiple of the sector size "
+                   << sector;
         return NIXL_ERR_INVALID_PARAM;
     }
 
@@ -696,13 +715,14 @@ nixlSpdkEngine::computeBlockRange(const nixlMetaDesc &local_desc,
     // range past the bound is REJECTED here, before staging any DMA, never split.
     const uint32_t max_op = spdk_shim_max_block_len_op(shim_);
     if (len > max_op) {
-        NIXL_ERROR << "SPDK: block length " << len << " exceeds the single-op bound "
-                   << max_op << " bytes; rejecting (no striping)";
+        NIXL_ERROR << "SPDK: block length " << len << " exceeds the single-op bound " << max_op
+                   << " bytes; rejecting (no striping)";
         return NIXL_ERR_INVALID_PARAM;
     }
 
     const uint64_t lba = static_cast<uint64_t>(remote_desc.addr);
-    const uint64_t nlba = static_cast<uint64_t>(len) / sector; // <= MAX_VALUE_LEN/sector, fits uint32
+    const uint64_t nlba =
+        static_cast<uint64_t>(len) / sector; // <= MAX_VALUE_LEN/sector, fits uint32
     const uint64_t capacity = spdk_shim_num_sectors(shim_);
 
     // Capacity: reject an LBA at/after the end, or a range running past it.
@@ -720,9 +740,9 @@ nixlSpdkEngine::computeBlockRange(const nixlMetaDesc &local_desc,
 
 nixl_status_t
 nixlSpdkEngine::postXferBlock(const nixl_xfer_op_t &operation,
-                                const nixl_meta_dlist_t &local,
-                                const nixl_meta_dlist_t &remote,
-                                nixlBackendReqH *handle) const {
+                              const nixl_meta_dlist_t &local,
+                              const nixl_meta_dlist_t &remote,
+                              nixlBackendReqH *handle) const {
     auto *req_h = static_cast<nixlSpdkBackendReqH *>(handle);
     // Block has no value auto-sizing (getReqTrueLen -> 0).
     req_h->true_len = 0;
@@ -782,11 +802,12 @@ nixlSpdkEngine::postXferBlock(const nixl_xfer_op_t &operation,
             if (!use_direct) {
                 io_buf = spdk_shim_dma_alloc_raw_aligned(data_len, SPDK_SHIM_DMA_REGION);
                 if (!io_buf) {
-                    NIXL_ERROR << "SPDK: block DMA buffer alloc failed (" << data_len
-                               << " bytes)";
+                    NIXL_ERROR << "SPDK: block DMA buffer alloc failed (" << data_len << " bytes)";
                     return -ENOMEM;
                 }
-                if (operation == NIXL_WRITE) std::memcpy(io_buf, data_ptr, data_len);
+                if (operation == NIXL_WRITE) {
+                    std::memcpy(io_buf, data_ptr, data_len);
+                }
             }
             spdk_shim_op_init(&slot.op);
             slot.op.staging = use_direct ? nullptr : io_buf;
@@ -803,8 +824,8 @@ nixlSpdkEngine::postXferBlock(const nixl_xfer_op_t &operation,
 
         int rc = submit_blk(direct);
         if (direct && rc < 0) {
-            NIXL_WARN << "SPDK: direct submit failed for block descriptor " << i
-                      << " (rc=" << rc << "); demoting to a staged copy";
+            NIXL_WARN << "SPDK: direct submit failed for block descriptor " << i << " (rc=" << rc
+                      << "); demoting to a staged copy";
             rc = submit_blk(false);
         }
         if (rc != 0) {
@@ -882,15 +903,19 @@ nixlSpdkEngine::reapOps(nixlBackendReqH *handle) const {
             // Read the length back with getReqTrueLen(handle, desc).
             req_h->true_len = value_len;
             req_h->true_len_desc = slot.desc;
-            NIXL_WARN << "SPDK: value (" << value_len << " B) exceeds host buffer ("
-                      << slot.len << " B) for descriptor " << slot.desc
+            NIXL_WARN << "SPDK: value (" << value_len << " B) exceeds host buffer (" << slot.len
+                      << " B) for descriptor " << slot.desc
                       << "; reporting true length for resize+retry";
-            if (req_h->status == NIXL_IN_PROG) req_h->status = NIXL_ERR_MISMATCH;
+            if (req_h->status == NIXL_IN_PROG) {
+                req_h->status = NIXL_ERR_MISMATCH;
+            }
             continue;
         }
         if (rc != 0) {
             NIXL_ERROR << "SPDK: descriptor " << slot.desc << " failed: rc=" << rc;
-            if (req_h->status == NIXL_IN_PROG) req_h->status = NIXL_ERR_BACKEND;
+            if (req_h->status == NIXL_IN_PROG) {
+                req_h->status = NIXL_ERR_BACKEND;
+            }
             continue;
         }
     }
@@ -926,7 +951,7 @@ nixlSpdkEngine::releaseReqH(nixlBackendReqH *handle) const {
 
 nixl_status_t
 nixlSpdkEngine::queryMem(const nixl_reg_dlist_t &descs,
-                          std::vector<nixl_query_resp_t> &resp) const {
+                         std::vector<nixl_query_resp_t> &resp) const {
     // Serialize the shim's single qpair (spdk_shim_exist submits+polls) and
     // shared completion state against a concurrent postXfer/registerMem.
     NIXL_LOCK_GUARD(shim_lock_);
@@ -964,8 +989,8 @@ nixlSpdkEngine::queryMem(const nixl_reg_dlist_t &descs,
         std::vector<uint8_t> key;
         if (!spdkKvKeyFromBlobId(descs[i].metaInfo, maxKeyLen_, key)) {
             NIXL_ERROR << "SPDK: invalid KV key in metaInfo (empty or > "
-                       << static_cast<unsigned>(maxKeyLen_)
-                       << " bytes) in queryMem descriptor " << i;
+                       << static_cast<unsigned>(maxKeyLen_) << " bytes) in queryMem descriptor "
+                       << i;
             return NIXL_ERR_INVALID_PARAM;
         }
 
@@ -979,8 +1004,7 @@ nixlSpdkEngine::queryMem(const nixl_reg_dlist_t &descs,
         } else {
             // Positive device sc other than KEY_DOES_NOT_EXIST, or a negated
             // errno: a real error, NOT a miss.
-            NIXL_ERROR << "SPDK: spdk_shim_exist failed for descriptor "
-                       << i << ": rc=" << rc;
+            NIXL_ERROR << "SPDK: spdk_shim_exist failed for descriptor " << i << ": rc=" << rc;
             return NIXL_ERR_BACKEND;
         }
     }

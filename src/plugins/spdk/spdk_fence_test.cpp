@@ -33,58 +33,55 @@
 
 static int g_failures;
 
-#define CHECK(cond)                                                            \
-	do {                                                                   \
-		if (!(cond)) {                                                  \
-			fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, \
-				#cond);                                        \
-			g_failures++;                                          \
-		}                                                              \
-	} while (0)
+#define CHECK(cond)                                                         \
+    do {                                                                    \
+        if (!(cond)) {                                                      \
+            fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+            g_failures++;                                                   \
+        }                                                                   \
+    } while (0)
 
 /* Counting fake for the drain() free callback: records how many times each
  * buffer is freed so we can assert "exactly once". */
 enum { MAX_FREED = 16 };
+
 static void *g_freed[MAX_FREED];
 static int g_free_calls;
 
 static void
-counting_free(void *p)
-{
-	if (g_free_calls < MAX_FREED) {
-		g_freed[g_free_calls] = p;
-	}
-	g_free_calls++;
+counting_free(void *p) {
+    if (g_free_calls < MAX_FREED) {
+        g_freed[g_free_calls] = p;
+    }
+    g_free_calls++;
 }
 
 static int
-freed_count(const void *p)
-{
-	int n = 0;
-	for (int i = 0; i < g_free_calls && i < MAX_FREED; i++) {
-		if (g_freed[i] == p) {
-			n++;
-		}
-	}
-	return n;
+freed_count(const void *p) {
+    int n = 0;
+    for (int i = 0; i < g_free_calls && i < MAX_FREED; i++) {
+        if (g_freed[i] == p) {
+            n++;
+        }
+    }
+    return n;
 }
 
 /* A healthy op: begin stamps a fresh generation, the matching completion is
  * recorded, and status reads back. */
 static void
-test_happy_path(void)
-{
-	struct spdk_fence f;
-	struct spdk_op_tag tag;
+test_happy_path(void) {
+    struct spdk_fence f;
+    struct spdk_op_tag tag;
 
-	spdk_fence_init(&f);
-	CHECK(!spdk_fence_poisoned(&f));
+    spdk_fence_init(&f);
+    CHECK(!spdk_fence_poisoned(&f));
 
-	CHECK(spdk_fence_begin(&f, &tag));
-	CHECK(!spdk_fence_done(&tag));
-	CHECK(spdk_fence_complete(&tag, 0 /*GENERIC*/, 0x00, 4096));
-	CHECK(spdk_fence_done(&tag));
-	CHECK(tag.op_sct == 0 && tag.op_sc == 0x00 && tag.op_cdw0 == 4096);
+    CHECK(spdk_fence_begin(&f, &tag));
+    CHECK(!spdk_fence_done(&tag));
+    CHECK(spdk_fence_complete(&tag, 0 /*GENERIC*/, 0x00, 4096));
+    CHECK(spdk_fence_done(&tag));
+    CHECK(tag.op_sct == 0 && tag.op_sc == 0x00 && tag.op_cdw0 == 4096);
 }
 
 /*
@@ -94,96 +91,93 @@ test_happy_path(void)
  * outstanding, and B must report its OWN status/cdw0.
  */
 static void
-test_stale_orphan_discarded(void)
-{
-	struct spdk_fence f;
-	struct spdk_op_tag tag_a, tag_b;
+test_stale_orphan_discarded(void) {
+    struct spdk_fence f;
+    struct spdk_op_tag tag_a, tag_b;
 
-	spdk_fence_init(&f);
+    spdk_fence_init(&f);
 
-	CHECK(spdk_fence_begin(&f, &tag_a)); /* gen N   */
-	CHECK(spdk_fence_begin(&f, &tag_b)); /* gen N+1 */
-	CHECK(tag_a.gen != tag_b.gen);
+    CHECK(spdk_fence_begin(&f, &tag_a)); /* gen N   */
+    CHECK(spdk_fence_begin(&f, &tag_b)); /* gen N+1 */
+    CHECK(tag_a.gen != tag_b.gen);
 
-	/* The submitter gives up on A; both are still in flight as far as the
-	 * device is concerned. */
-	spdk_fence_abandon(&tag_a);
+    /* The submitter gives up on A; both are still in flight as far as the
+     * device is concerned. */
+    spdk_fence_abandon(&tag_a);
 
-	/* A's orphan arrives first, carrying a bogus status + length. */
-	CHECK(!spdk_fence_complete(&tag_a, 1 /*non-generic*/, 0x85, 12345));
-	CHECK(!spdk_fence_done(&tag_a));
-	CHECK(!spdk_fence_done(&tag_b)); /* B untouched */
+    /* A's orphan arrives first, carrying a bogus status + length. */
+    CHECK(!spdk_fence_complete(&tag_a, 1 /*non-generic*/, 0x85, 12345));
+    CHECK(!spdk_fence_done(&tag_a));
+    CHECK(!spdk_fence_done(&tag_b)); /* B untouched */
 
-	/* B's real completion records B's own status/length. */
-	CHECK(spdk_fence_complete(&tag_b, 0, 0x00, 42));
-	CHECK(spdk_fence_done(&tag_b));
-	CHECK(tag_b.op_sct == 0 && tag_b.op_sc == 0x00 && tag_b.op_cdw0 == 42);
+    /* B's real completion records B's own status/length. */
+    CHECK(spdk_fence_complete(&tag_b, 0, 0x00, 42));
+    CHECK(spdk_fence_done(&tag_b));
+    CHECK(tag_b.op_sct == 0 && tag_b.op_sc == 0x00 && tag_b.op_cdw0 == 42);
 
-	/* An even-later duplicate orphan for A is still discarded, not recorded. */
-	CHECK(!spdk_fence_complete(&tag_a, 1, 0x85, 12345));
-	CHECK(tag_b.op_cdw0 == 42); /* B's value intact */
+    /* An even-later duplicate orphan for A is still discarded, not recorded. */
+    CHECK(!spdk_fence_complete(&tag_a, 1, 0x85, 12345));
+    CHECK(tag_b.op_cdw0 == 42); /* B's value intact */
 }
 
 /* After a timeout/transport-fail poison, every begin() is refused until drain. */
 static void
-test_poison_refuses_submits(void)
-{
-	struct spdk_fence f;
-	struct spdk_op_tag tag;
-	uint64_t gen_before;
+test_poison_refuses_submits(void) {
+    struct spdk_fence f;
+    struct spdk_op_tag tag;
+    uint64_t gen_before;
 
-	spdk_fence_init(&f);
-	CHECK(spdk_fence_begin(&f, &tag));
-	gen_before = f.gen;
+    spdk_fence_init(&f);
+    CHECK(spdk_fence_begin(&f, &tag));
+    gen_before = f.gen;
 
-	/* spdk_shim_poll() latches this on -ETIMEDOUT / -ENXIO. */
-	spdk_fence_poison(&f);
-	CHECK(spdk_fence_poisoned(&f));
+    /* spdk_shim_poll() latches this on -ETIMEDOUT / -ENXIO. */
+    spdk_fence_poison(&f);
+    CHECK(spdk_fence_poisoned(&f));
 
-	/* Refused, and the generation does not advance (no new op started). */
-	CHECK(!spdk_fence_begin(&f, &tag));
-	CHECK(f.gen == gen_before);
-	/* Idempotent poison. */
-	spdk_fence_poison(&f);
-	CHECK(!spdk_fence_begin(&f, &tag));
+    /* Refused, and the generation does not advance (no new op started). */
+    CHECK(!spdk_fence_begin(&f, &tag));
+    CHECK(f.gen == gen_before);
+    /* Idempotent poison. */
+    spdk_fence_poison(&f);
+    CHECK(!spdk_fence_begin(&f, &tag));
 
-	/* Fencing teardown drains + clears poison; then ops resume. */
-	spdk_fence_drain(&f, counting_free);
-	CHECK(!spdk_fence_poisoned(&f));
-	CHECK(spdk_fence_begin(&f, &tag));
+    /* Fencing teardown drains + clears poison; then ops resume. */
+    spdk_fence_drain(&f, counting_free);
+    CHECK(!spdk_fence_poisoned(&f));
+    CHECK(spdk_fence_begin(&f, &tag));
 }
 
 /* Quarantined buffers are freed exactly once, only by drain(). */
 static void
-test_quarantine_freed_once(void)
-{
-	struct spdk_fence f;
-	int buf0, buf1, buf2; /* stand-ins for staging buffers (addresses only) */
+test_quarantine_freed_once(void) {
+    struct spdk_fence f;
+    int buf0, buf1, buf2; /* stand-ins for staging buffers (addresses only) */
 
-	g_free_calls = 0;
-	spdk_fence_init(&f);
-	spdk_fence_poison(&f);
+    g_free_calls = 0;
+    spdk_fence_init(&f);
+    spdk_fence_poison(&f);
 
-	CHECK(spdk_fence_quarantine(&f, &buf0) == 0);
-	CHECK(spdk_fence_quarantine(&f, &buf1) == 0);
-	CHECK(spdk_fence_quarantine(&f, &buf2) == 0);
-	/* NULL is a no-op, never counted. */
-	CHECK(spdk_fence_quarantine(&f, NULL) == 0);
+    CHECK(spdk_fence_quarantine(&f, &buf0) == 0);
+    CHECK(spdk_fence_quarantine(&f, &buf1) == 0);
+    CHECK(spdk_fence_quarantine(&f, &buf2) == 0);
+    /* NULL is a no-op, never counted. */
+    CHECK(spdk_fence_quarantine(&f, NULL) == 0);
 
-	/* Nothing is freed before the fencing teardown. */
-	CHECK(g_free_calls == 0);
+    /* Nothing is freed before the fencing teardown. */
+    CHECK(g_free_calls == 0);
 
-	spdk_fence_drain(&f, counting_free);
-	CHECK(g_free_calls == 3);
-	CHECK(freed_count(&buf0) == 1);
-	CHECK(freed_count(&buf1) == 1);
-	CHECK(freed_count(&buf2) == 1);
+    spdk_fence_drain(&f, counting_free);
+    CHECK(g_free_calls == 3);
+    CHECK(freed_count(&buf0) == 1);
+    CHECK(freed_count(&buf1) == 1);
+    CHECK(freed_count(&buf2) == 1);
 
-	/* Quarantine emptied and poison cleared: a second drain frees nothing. */
-	g_free_calls = 0;
-	spdk_fence_drain(&f, counting_free);
-	CHECK(g_free_calls == 0);
-	CHECK(!spdk_fence_poisoned(&f));
+    /* Quarantine emptied and poison cleared: a second drain frees nothing. */
+    g_free_calls = 0;
+    spdk_fence_drain(&f, counting_free);
+    CHECK(g_free_calls == 0);
+    CHECK(!spdk_fence_poisoned(&f));
 }
 
 /*
@@ -192,43 +186,41 @@ test_quarantine_freed_once(void)
  * runs against a live tracker and no freed buffer is exposed to DMA.
  */
 static void
-test_fenced_flow(void)
-{
-	struct spdk_fence f;
-	struct spdk_op_tag tag;
-	int staging; /* stand-in for A's staging buffer */
+test_fenced_flow(void) {
+    struct spdk_fence f;
+    struct spdk_op_tag tag;
+    int staging; /* stand-in for A's staging buffer */
 
-	g_free_calls = 0;
-	spdk_fence_init(&f);
+    g_free_calls = 0;
+    spdk_fence_init(&f);
 
-	CHECK(spdk_fence_begin(&f, &tag)); /* submit op A */
-	spdk_fence_poison(&f);             /* poll timed out */
-	/* Backend releases the staging buffer: poisoned => quarantined, not freed. */
-	CHECK(spdk_fence_quarantine(&f, &staging) == 0);
-	CHECK(g_free_calls == 0);
+    CHECK(spdk_fence_begin(&f, &tag)); /* submit op A */
+    spdk_fence_poison(&f); /* poll timed out */
+    /* Backend releases the staging buffer: poisoned => quarantined, not freed. */
+    CHECK(spdk_fence_quarantine(&f, &staging) == 0);
+    CHECK(g_free_calls == 0);
 
-	/* No later op can be submitted onto the fenced qpair. */
-	CHECK(!spdk_fence_begin(&f, &tag));
+    /* No later op can be submitted onto the fenced qpair. */
+    CHECK(!spdk_fence_begin(&f, &tag));
 
-	/* close(): free_io_qpair() proves the tracker dead, then drain releases. */
-	spdk_fence_drain(&f, counting_free);
-	CHECK(freed_count(&staging) == 1);
-	CHECK(!spdk_fence_poisoned(&f));
+    /* close(): free_io_qpair() proves the tracker dead, then drain releases. */
+    spdk_fence_drain(&f, counting_free);
+    CHECK(freed_count(&staging) == 1);
+    CHECK(!spdk_fence_poisoned(&f));
 }
 
 int
-main(void)
-{
-	test_happy_path();
-	test_stale_orphan_discarded();
-	test_poison_refuses_submits();
-	test_quarantine_freed_once();
-	test_fenced_flow();
+main(void) {
+    test_happy_path();
+    test_stale_orphan_discarded();
+    test_poison_refuses_submits();
+    test_quarantine_freed_once();
+    test_fenced_flow();
 
-	if (g_failures != 0) {
-		fprintf(stderr, "spdk_fence_test: %d check(s) FAILED\n", g_failures);
-		return 1;
-	}
-	printf("spdk_fence_test: all checks passed\n");
-	return 0;
+    if (g_failures != 0) {
+        fprintf(stderr, "spdk_fence_test: %d check(s) FAILED\n", g_failures);
+        return 1;
+    }
+    printf("spdk_fence_test: all checks passed\n");
+    return 0;
 }

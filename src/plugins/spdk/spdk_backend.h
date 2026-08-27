@@ -186,8 +186,7 @@ public:
     // miss), so a real failure is not mistaken for a cache miss. Transfers no
     // value data.
     nixl_status_t
-    queryMem(const nixl_reg_dlist_t &descs,
-             std::vector<nixl_query_resp_t> &resp) const override;
+    queryMem(const nixl_reg_dlist_t &descs, std::vector<nixl_query_resp_t> &resp) const override;
 
     // Value auto-sizing helper. After a postXfer READ that reported
     // NIXL_ERR_MISMATCH because the host buffer was too small, this returns the
@@ -256,7 +255,8 @@ private:
     // request status, and copy a staged read back to the caller. Called by
     // checkXfer and releaseReqH with shim_lock_ held. Takes the base type
     // because the concrete handle is file-local to the implementation.
-    void reapOps(nixlBackendReqH *handle) const;
+    void
+    reapOps(nixlBackendReqH *handle) const;
 
     // The SPDK KV shim handle (owns the controller attach + qpair).
     spdk_shim *shim_ = nullptr;

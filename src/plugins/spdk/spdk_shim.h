@@ -97,10 +97,10 @@
  * the device's MDTS-derived max transfer size at open, because the KV-raw path
  * bypasses lib/nvme's MDTS splitting (see spdk_shim_max_value_len_op()).
  */
-#define SPDK_SHIM_DMA_REGION      (2ULL * 1024 * 1024)
+#define SPDK_SHIM_DMA_REGION (2ULL * 1024 * 1024)
 #define SPDK_SHIM_MAX_SGL_REGIONS 33u
 #define SPDK_SHIM_MAX_VALUE_LEN \
-	((uint32_t)((SPDK_SHIM_MAX_SGL_REGIONS - 1u) * SPDK_SHIM_DMA_REGION))
+    ((uint32_t)((SPDK_SHIM_MAX_SGL_REGIONS - 1u) * SPDK_SHIM_DMA_REGION))
 
 /** Opaque shim handle. */
 struct spdk_shim;
@@ -114,29 +114,29 @@ struct spdk_shim;
  * request object instead of allocating one per op.
  */
 struct spdk_shim_op {
-	/* Completion slot and identity; also the submit call's cb_arg. */
-	struct spdk_op_tag	tag;
-	/* Region-bounded SGL iterator for this op's buffer. lib/nvme drives it
-	 * through the reset/next callbacks with this op as the argument. */
-	const uint8_t		*sgl_base;
-	uint32_t		sgl_total;
-	uint32_t		sgl_off;
-	/* Deadline in ticks, checked by spdk_shim_poll(). */
-	uint64_t		deadline;
-	/*
-	 * Staging buffer this op owns, or NULL when it DMAs straight into the
-	 * caller's memory. Freed when the op is reaped, or quarantined if the op was
-	 * abandoned with a possibly-live tracker.
-	 */
-	void			*staging;
-	/* Set while the op is on the shim's in-flight list. */
-	bool			submitted;
-	/* Set by spdk_shim_poll() when the op passed its deadline. */
-	bool			expired;
-	/* Retrieve normalizes its short-buffer result; Store does not. */
-	bool			is_retrieve;
-	/* Links the shim's in-flight list; do not touch. */
-	struct spdk_shim_op	*next;
+    /* Completion slot and identity; also the submit call's cb_arg. */
+    struct spdk_op_tag tag;
+    /* Region-bounded SGL iterator for this op's buffer. lib/nvme drives it
+     * through the reset/next callbacks with this op as the argument. */
+    const uint8_t *sgl_base;
+    uint32_t sgl_total;
+    uint32_t sgl_off;
+    /* Deadline in ticks, checked by spdk_shim_poll(). */
+    uint64_t deadline;
+    /*
+     * Staging buffer this op owns, or NULL when it DMAs straight into the
+     * caller's memory. Freed when the op is reaped, or quarantined if the op was
+     * abandoned with a possibly-live tracker.
+     */
+    void *staging;
+    /* Set while the op is on the shim's in-flight list. */
+    bool submitted;
+    /* Set by spdk_shim_poll() when the op passed its deadline. */
+    bool expired;
+    /* Retrieve normalizes its short-buffer result; Store does not. */
+    bool is_retrieve;
+    /* Links the shim's in-flight list; do not touch. */
+    struct spdk_shim_op *next;
 };
 
 /**
@@ -145,11 +145,11 @@ struct spdk_shim_op {
  * both a KV and a block namespace; an agent that needs both opens two shims.
  */
 enum spdk_shim_ns_kind {
-	/** Bind a CSI==KV namespace; enables Store/Retrieve/Exist.
-	 *  This is 0 so a zero-initialized opts keeps the historical KV behavior. */
-	SPDK_SHIM_NS_KIND_KV = 0,
-	/** Bind a CSI==NVM (block) namespace; enables LBA read/write. */
-	SPDK_SHIM_NS_KIND_BLOCK = 1,
+    /** Bind a CSI==KV namespace; enables Store/Retrieve/Exist.
+     *  This is 0 so a zero-initialized opts keeps the historical KV behavior. */
+    SPDK_SHIM_NS_KIND_KV = 0,
+    /** Bind a CSI==NVM (block) namespace; enables LBA read/write. */
+    SPDK_SHIM_NS_KIND_BLOCK = 1,
 };
 
 /**
@@ -158,50 +158,50 @@ enum spdk_shim_ns_kind {
  * shim can stay ABI-compatible as fields are added.
  */
 struct spdk_shim_opts {
-	/** Size of this struct as known to the caller. Must be set first. */
-	size_t		opts_size;
-	/** SPDK env name (used only when init_env is true). May be NULL. */
-	const char	*name;
-	/**
-	 * SPDK transport ID string, parsed with spdk_nvme_transport_id_parse().
-	 * The datapath is transport-agnostic: the same open/probe/attach/bind path
-	 * drives either
-	 *   "trtype:VFIOUSER traddr:<socket-directory>"  (an SPDK vfio-user target)
-	 * or
-	 *   "trtype:PCIE traddr:<BDF>"                    (a real NVMe controller
-	 *                                                  bound to vfio-pci),
-	 * selected purely by this string with no code fork. PCIE device-mode is
-	 * exercised by run_block_pcie.sh against a scratch NVMe namespace.
-	 */
-	const char	*transport_id;
-	/**
-	 * Namespace id to bind; 0 selects the first namespace matching \c ns_kind.
-	 * When nonzero the requested namespace must itself be of that kind.
-	 */
-	uint32_t	nsid;
-	/**
-	 * When true, the shim calls spdk_env_init() in open() and
-	 * spdk_env_fini() in close(). When false, the caller (host/agent) owns
-	 * the SPDK env and must have initialized it already.
-	 *
-	 * IMPORTANT (single-instance / single-lifetime): DPDK cannot
-	 * re-initialize the SPDK env within one process, so an init_env=true
-	 * shim initializes the process env exactly ONCE for its whole lifetime.
-	 * After spdk_shim_close() releases it (spdk_env_fini()), a second
-	 * init_env=true open in the same process fails. The env is brought up
-	 * with no_huge=true (IOVA=VA) and a 512 MB heap so an unprivileged
-	 * in-process host works without reserved hugepages; this path is for
-	 * standalone tests. The init_env=false path (production; host owns the
-	 * env) may be opened/closed repeatedly.
-	 */
-	bool		init_env;
-	/**
-	 * Which namespace kind to bind (option (b), one namespace per engine).
-	 * SPDK_SHIM_NS_KIND_KV (the 0 default) preserves the historical KV
-	 * datapath; SPDK_SHIM_NS_KIND_BLOCK binds a CSI==NVM namespace and
-	 * enables spdk_shim_read()/spdk_shim_write().
-	 */
-	enum spdk_shim_ns_kind ns_kind;
+    /** Size of this struct as known to the caller. Must be set first. */
+    size_t opts_size;
+    /** SPDK env name (used only when init_env is true). May be NULL. */
+    const char *name;
+    /**
+     * SPDK transport ID string, parsed with spdk_nvme_transport_id_parse().
+     * The datapath is transport-agnostic: the same open/probe/attach/bind path
+     * drives either
+     *   "trtype:VFIOUSER traddr:<socket-directory>"  (an SPDK vfio-user target)
+     * or
+     *   "trtype:PCIE traddr:<BDF>"                    (a real NVMe controller
+     *                                                  bound to vfio-pci),
+     * selected purely by this string with no code fork. PCIE device-mode is
+     * exercised by run_block_pcie.sh against a scratch NVMe namespace.
+     */
+    const char *transport_id;
+    /**
+     * Namespace id to bind; 0 selects the first namespace matching \c ns_kind.
+     * When nonzero the requested namespace must itself be of that kind.
+     */
+    uint32_t nsid;
+    /**
+     * When true, the shim calls spdk_env_init() in open() and
+     * spdk_env_fini() in close(). When false, the caller (host/agent) owns
+     * the SPDK env and must have initialized it already.
+     *
+     * IMPORTANT (single-instance / single-lifetime): DPDK cannot
+     * re-initialize the SPDK env within one process, so an init_env=true
+     * shim initializes the process env exactly ONCE for its whole lifetime.
+     * After spdk_shim_close() releases it (spdk_env_fini()), a second
+     * init_env=true open in the same process fails. The env is brought up
+     * with no_huge=true (IOVA=VA) and a 512 MB heap so an unprivileged
+     * in-process host works without reserved hugepages; this path is for
+     * standalone tests. The init_env=false path (production; host owns the
+     * env) may be opened/closed repeatedly.
+     */
+    bool init_env;
+    /**
+     * Which namespace kind to bind (option (b), one namespace per engine).
+     * SPDK_SHIM_NS_KIND_KV (the 0 default) preserves the historical KV
+     * datapath; SPDK_SHIM_NS_KIND_BLOCK binds a CSI==NVM namespace and
+     * enables spdk_shim_read()/spdk_shim_write().
+     */
+    enum spdk_shim_ns_kind ns_kind;
 };
 
 /**
@@ -215,17 +215,20 @@ struct spdk_shim_opts {
  *
  * \return 0 on success, a negated errno on failure.
  */
-int spdk_shim_open(const struct spdk_shim_opts *opts, struct spdk_shim **out);
+int
+spdk_shim_open(const struct spdk_shim_opts *opts, struct spdk_shim **out);
 
 /**
  * Close a shim opened by spdk_shim_open(). Safe to call with NULL. For an
  * init_env=true shim this also calls spdk_env_fini() (see the single-lifetime
  * constraint above).
  */
-void spdk_shim_close(struct spdk_shim *sh);
+void
+spdk_shim_close(struct spdk_shim *sh);
 
 /** Allocate a DMA-capable buffer of \c len bytes (zeroed). NULL on failure. */
-void *spdk_shim_dma_alloc(size_t len);
+void *
+spdk_shim_dma_alloc(size_t len);
 
 /**
  * Allocate a DMA-capable buffer of \c len bytes (zeroed) aligned to \c align
@@ -234,7 +237,8 @@ void *spdk_shim_dma_alloc(size_t len);
  * span becomes its own region-bounded data-block descriptor and no descriptor
  * straddles two independently-mapped vfio-user regions.
  */
-void *spdk_shim_dma_alloc_aligned(size_t len, size_t align);
+void *
+spdk_shim_dma_alloc_aligned(size_t len, size_t align);
 
 /**
  * Non-zeroing (raw) variants of the two allocators above, for a STAGING buffer
@@ -248,15 +252,18 @@ void *spdk_shim_dma_alloc_aligned(size_t len, size_t align);
  * free/release rules as the zeroing variants (spdk_shim_dma_free /
  * spdk_shim_release_io_buf). NULL on failure.
  */
-void *spdk_shim_dma_alloc_raw(size_t len);
-void *spdk_shim_dma_alloc_raw_aligned(size_t len, size_t align);
+void *
+spdk_shim_dma_alloc_raw(size_t len);
+void *
+spdk_shim_dma_alloc_raw_aligned(size_t len, size_t align);
 
 /** Free a buffer returned by spdk_shim_dma_alloc[_aligned](). Safe with NULL.
  *  Use this ONLY for buffers not tied to an in-flight op (e.g. cleaning up after
  *  an alloc failure). To release a per-op STAGING buffer after an op returned,
  *  use spdk_shim_release_io_buf() so a timed-out op's still-live DMA tracker
  *  cannot be left pointing at freed memory. */
-void spdk_shim_dma_free(void *buf);
+void
+spdk_shim_dma_free(void *buf);
 
 /**
  * Release a per-op STAGING buffer (from spdk_shim_dma_alloc[_aligned]()) once
@@ -269,7 +276,8 @@ void spdk_shim_dma_free(void *buf);
  * poisoning error the shim refuses further ops (returns -ESHUTDOWN) until it is
  * closed.
  */
-void spdk_shim_release_io_buf(struct spdk_shim *sh, void *buf);
+void
+spdk_shim_release_io_buf(struct spdk_shim *sh, void *buf);
 
 /**
  * Is the shim POISONED? True once an op timed out or the qpair
@@ -279,7 +287,8 @@ void spdk_shim_release_io_buf(struct spdk_shim *sh, void *buf);
  * routes an abandoned op's staging buffer to the quarantine. Safe with
  * \c sh == NULL (returns false).
  */
-bool spdk_shim_poisoned(const struct spdk_shim *sh);
+bool
+spdk_shim_poisoned(const struct spdk_shim *sh);
 
 /**
  * Make a caller-owned host region [\c vaddr, \c vaddr + \c len) usable DIRECTLY
@@ -314,7 +323,8 @@ bool spdk_shim_poisoned(const struct spdk_shim *sh);
  * env-global (takes no shim handle), so the caller passes back the same
  * (\c vaddr, \c len).
  */
-int spdk_shim_mem_register(struct spdk_shim *sh, void *vaddr, size_t len);
+int
+spdk_shim_mem_register(struct spdk_shim *sh, void *vaddr, size_t len);
 
 /**
  * Release a registration that spdk_shim_mem_register() reported as OWNED
@@ -326,13 +336,16 @@ int spdk_shim_mem_register(struct spdk_shim *sh, void *vaddr, size_t len);
  *
  * \return 0 on success, a negated errno on failure.
  */
-int spdk_shim_mem_unregister(void *vaddr, size_t len);
+int
+spdk_shim_mem_unregister(void *vaddr, size_t len);
 
 /** Maximum value length (kvvml) advertised by the bound KV namespace. */
-uint32_t spdk_shim_max_value_len(const struct spdk_shim *sh);
+uint32_t
+spdk_shim_max_value_len(const struct spdk_shim *sh);
 
 /** Maximum key length (kvkml) advertised by the bound KV namespace. */
-uint32_t spdk_shim_max_key_len(const struct spdk_shim *sh);
+uint32_t
+spdk_shim_max_key_len(const struct spdk_shim *sh);
 
 /**
  * Largest value length transferable in a single op: the region-bounded SGL
@@ -342,13 +355,15 @@ uint32_t spdk_shim_max_key_len(const struct spdk_shim *sh);
  * namespace-advertised max value length (kvvml) when that is smaller and
  * nonzero. A Store/Retrieve above this is REJECTED (-EFBIG), NOT striped.
  */
-uint32_t spdk_shim_max_value_len_op(const struct spdk_shim *sh);
+uint32_t
+spdk_shim_max_value_len_op(const struct spdk_shim *sh);
 
 /**
  * Reset \c op to the clean, unsubmitted state. Call before each submit; an op
  * may be reused once it has been reaped.
  */
-void spdk_shim_op_init(struct spdk_shim_op *op);
+void
+spdk_shim_op_init(struct spdk_shim_op *op);
 
 /**
  * Submit a KV Store of \c value (\c value_len bytes) under \c key. \c value
@@ -359,9 +374,13 @@ void spdk_shim_op_init(struct spdk_shim_op *op);
  * \return 0 once the command is on the qpair, or a negated errno if it was
  * never submitted (in which case \c op is not in flight and holds no result).
  */
-int spdk_shim_store(struct spdk_shim *sh, struct spdk_shim_op *op,
-		       const void *key, uint8_t key_len,
-		       const void *value, uint32_t value_len);
+int
+spdk_shim_store(struct spdk_shim *sh,
+                struct spdk_shim_op *op,
+                const void *key,
+                uint8_t key_len,
+                const void *value,
+                uint32_t value_len);
 
 /**
  * Submit a KV Retrieve for \c key into \c value (\c buf_len bytes). Same
@@ -370,9 +389,13 @@ int spdk_shim_store(struct spdk_shim *sh, struct spdk_shim_op *op,
  *
  * \return as spdk_shim_store().
  */
-int spdk_shim_retrieve(struct spdk_shim *sh, struct spdk_shim_op *op,
-			  const void *key, uint8_t key_len,
-			  void *value, uint32_t buf_len);
+int
+spdk_shim_retrieve(struct spdk_shim *sh,
+                   struct spdk_shim_op *op,
+                   const void *key,
+                   uint8_t key_len,
+                   void *value,
+                   uint32_t buf_len);
 
 /**
  * Reap completions on the qpair and expire any op past its deadline. Runs each
@@ -383,10 +406,12 @@ int spdk_shim_retrieve(struct spdk_shim *sh, struct spdk_shim_op *op,
  * \return the number of completions reaped, or a negated errno if the qpair
  * failed at the transport level (which also poisons the shim).
  */
-int spdk_shim_poll(struct spdk_shim *sh, uint32_t max);
+int
+spdk_shim_poll(struct spdk_shim *sh, uint32_t max);
 
 /** Has \c op completed (or been expired by spdk_shim_poll())? */
-bool spdk_shim_op_done(const struct spdk_shim_op *op);
+bool
+spdk_shim_op_done(const struct spdk_shim_op *op);
 
 /**
  * Read a completed op's result and take it off the in-flight list. \c op must
@@ -404,8 +429,8 @@ bool spdk_shim_op_done(const struct spdk_shim_op *op);
  *
  * \return per the return convention documented at the top of this header.
  */
-int spdk_shim_op_result(struct spdk_shim *sh, struct spdk_shim_op *op,
-			   uint32_t *value_len_out);
+int
+spdk_shim_op_result(struct spdk_shim *sh, struct spdk_shim_op *op, uint32_t *value_len_out);
 
 /**
  * Release what \c op holds after its result has been read. Normally this frees
@@ -413,9 +438,11 @@ int spdk_shim_op_result(struct spdk_shim *sh, struct spdk_shim_op *op,
  * the buffer is QUARANTINED instead and freed at the fencing teardown in
  * spdk_shim_close(). Safe on an op with no staging buffer.
  */
-void spdk_shim_op_release(struct spdk_shim *sh, struct spdk_shim_op *op);
+void
+spdk_shim_op_release(struct spdk_shim *sh, struct spdk_shim_op *op);
 
-int spdk_shim_exist(struct spdk_shim *sh, const void *key, uint8_t key_len);
+int
+spdk_shim_exist(struct spdk_shim *sh, const void *key, uint8_t key_len);
 
 /* --------------------------------------------------------------------------
  * Block (CSI==NVM) datapath.
@@ -431,11 +458,13 @@ int spdk_shim_exist(struct spdk_shim *sh, const void *key, uint8_t key_len);
 
 /** Logical block (sector) size in bytes of the bound block namespace, or 0 if
  *  the shim is not block-bound. */
-uint32_t spdk_shim_sector_size(const struct spdk_shim *sh);
+uint32_t
+spdk_shim_sector_size(const struct spdk_shim *sh);
 
 /** Number of logical blocks (sectors) in the bound block namespace, or 0 if
  *  the shim is not block-bound. LBA + lba_count must stay <= this. */
-uint64_t spdk_shim_num_sectors(const struct spdk_shim *sh);
+uint64_t
+spdk_shim_num_sectors(const struct spdk_shim *sh);
 
 /**
  * Largest block transfer (in bytes) carryable in a single op: the region-bounded
@@ -443,7 +472,8 @@ uint64_t spdk_shim_num_sectors(const struct spdk_shim *sh);
  * spdk_shim_max_value_len_op() for the block path. Returns 0 for a non-block
  * shim. A read/write above this is REJECTED (-EFBIG), NOT striped.
  */
-uint32_t spdk_shim_max_block_len_op(const struct spdk_shim *sh);
+uint32_t
+spdk_shim_max_block_len_op(const struct spdk_shim *sh);
 
 /**
  * Block write: copy \c lba_count sectors from the DMA-capable \c buf to the
@@ -457,8 +487,12 @@ uint32_t spdk_shim_max_block_len_op(const struct spdk_shim *sh);
  *         (0 on success; -EINVAL on a bad/out-of-range request; -EFBIG when
  *         past the single-op bound; -ENXIO etc.).
  */
-int spdk_shim_write(struct spdk_shim *sh, struct spdk_shim_op *op,
-		       const void *buf, uint64_t lba, uint32_t lba_count);
+int
+spdk_shim_write(struct spdk_shim *sh,
+                struct spdk_shim_op *op,
+                const void *buf,
+                uint64_t lba,
+                uint32_t lba_count);
 
 /**
  * Block read: copy \c lba_count sectors from the namespace starting at \c lba
@@ -467,7 +501,11 @@ int spdk_shim_write(struct spdk_shim *sh, struct spdk_shim_op *op,
  *
  * \return per the return convention documented at the top of this header.
  */
-int spdk_shim_read(struct spdk_shim *sh, struct spdk_shim_op *op,
-		      void *buf, uint64_t lba, uint32_t lba_count);
+int
+spdk_shim_read(struct spdk_shim *sh,
+               struct spdk_shim_op *op,
+               void *buf,
+               uint64_t lba,
+               uint32_t lba_count);
 
 #endif /* SPDK_SHIM_H */

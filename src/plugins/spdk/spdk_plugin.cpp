@@ -29,14 +29,12 @@ static const nixl_mem_list_t supported_segments = {DRAM_SEG, OBJ_SEG, BLK_SEG};
 #ifdef STATIC_PLUGIN_SPDK
 nixlBackendPlugin *
 createStaticSPDKPlugin() {
-    return spdk_plugin_t::create(
-        NIXL_PLUGIN_API_VERSION, "SPDK", "0.1.0", {}, supported_segments);
+    return spdk_plugin_t::create(NIXL_PLUGIN_API_VERSION, "SPDK", "0.1.0", {}, supported_segments);
 }
 #else
 extern "C" NIXL_PLUGIN_EXPORT nixlBackendPlugin *
 nixl_plugin_init() {
-    return spdk_plugin_t::create(
-        NIXL_PLUGIN_API_VERSION, "SPDK", "0.1.0", {}, supported_segments);
+    return spdk_plugin_t::create(NIXL_PLUGIN_API_VERSION, "SPDK", "0.1.0", {}, supported_segments);
 }
 
 extern "C" NIXL_PLUGIN_EXPORT void
