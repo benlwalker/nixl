@@ -95,6 +95,10 @@ public:
         int desc = -1;
         void *user_buf = nullptr; // caller memory to copy a staged READ back into
         size_t len = 0;
+        // Value auto-sizing: the device's TRUE stored value length, recorded
+        // when this descriptor's READ reported the host buffer was too small.
+        // 0 means no too-small result for it.
+        size_t true_len = 0;
         bool staged = false;
         bool reaped = false;
     };
@@ -106,14 +110,6 @@ public:
     // True for a READ, which is the only direction that copies a staged buffer
     // back and the only one with value auto-sizing.
     bool is_read = false;
-    // Value auto-sizing: the device's TRUE value length recorded when a READ's
-    // host buffer was too small (status == NIXL_ERR_MISMATCH). postXfer returns
-    // at the FIRST too-small descriptor, so at most one is ever recorded -- a
-    // scalar, not a per-descriptor vector. true_len_desc is that descriptor's
-    // index; -1 means "no too-small result recorded" (the READ fit, or none was
-    // reached). Read by getReqTrueLen, which returns true_len iff idx matches.
-    size_t true_len = 0;
-    int true_len_desc = -1;
     // Block path: the per-descriptor LBA ranges validated in prepXfer. Filled for
     // a BLK_SEG transfer and consumed by postXferBlock so it issues the pre-
     // validated IO instead of recomputing computeBlockRange per descriptor
@@ -552,10 +548,8 @@ nixlSpdkEngine::postXfer(const nixl_xfer_op_t &operation,
         return postXferBlock(operation, local, remote, handle);
     }
     auto *req_h = static_cast<nixlSpdkBackendReqH *>(handle);
-    // Value auto-sizing state: no too-small result yet (getReqTrueLen -> 0). Set
-    // to (true_len, i) only if a READ reports the host buffer was too small.
-    req_h->true_len = 0;
-    req_h->true_len_desc = -1;
+    // Value auto-sizing state lives in the ops, which are cleared below, so a
+    // reused handle starts with no too-small result (getReqTrueLen -> 0).
     req_h->is_read = (operation == NIXL_READ);
     req_h->ops.clear();
     req_h->outstanding = 0;
@@ -759,8 +753,6 @@ nixlSpdkEngine::postXferBlock(const nixl_xfer_op_t &operation,
                               nixlBackendReqH *handle) const {
     auto *req_h = static_cast<nixlSpdkBackendReqH *>(handle);
     // Block has no value auto-sizing (getReqTrueLen -> 0).
-    req_h->true_len = 0;
-    req_h->true_len_desc = -1;
     req_h->is_read = (operation == NIXL_READ);
     req_h->ops.clear();
     req_h->outstanding = 0;
@@ -930,8 +922,7 @@ nixlSpdkEngine::reapOps(nixlBackendReqH *handle) const {
             // can resize and re-Retrieve, and report MISMATCH rather than a
             // generic backend error, instead of handing back a truncated value.
             // Read the length back with getReqTrueLen(handle, desc).
-            req_h->true_len = value_len;
-            req_h->true_len_desc = slot.desc;
+            slot.true_len = value_len;
             NIXL_WARN << "SPDK: value (" << value_len << " B) exceeds host buffer (" << slot.len
                       << " B) for descriptor " << slot.desc
                       << "; reporting true length for resize+retry";
@@ -1054,10 +1045,15 @@ nixlSpdkEngine::getReqTrueLen(nixlBackendReqH *handle, int idx) const {
         return 0;
     }
     const auto *req_h = static_cast<const nixlSpdkBackendReqH *>(handle);
-    // A too-small READ records exactly one descriptor's true length. Return it
-    // only for that descriptor; every other index (and the no-mismatch case,
-    // true_len_desc == -1) reports 0, matching the old per-descriptor semantics.
-    return (idx == req_h->true_len_desc) ? req_h->true_len : 0;
+    // Every too-small descriptor records its own true length, because a READ
+    // list can have more than one and the caller has to resize each of them.
+    // A descriptor that fit, or that is not in this handle, reports 0.
+    for (const auto &slot : req_h->ops) {
+        if (slot.desc == idx) {
+            return slot.true_len;
+        }
+    }
+    return 0;
 }
 
 uint32_t
