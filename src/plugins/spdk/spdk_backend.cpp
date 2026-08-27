@@ -911,11 +911,14 @@ nixlSpdkEngine::reapOps(nixlBackendReqH *handle) const {
         --req_h->outstanding;
 
         if (rc == 0 && slot.staged && req_h->is_read) {
-            // Copy back only what the device wrote: the KV value length, or
-            // the whole span for a block read, which fills every sector. The
+            // Copy back only what the device wrote: the whole span for a block
+            // read, which fills every sector, or the KV value length. The
             // staging buffer is not zeroed, so its untouched tail must never
-            // reach the caller. Runs before the release below frees it.
-            const size_t n = value_len != 0 ? std::min<size_t>(value_len, slot.len) : slot.len;
+            // reach the caller -- which is why the KV side takes cdw0 as it
+            // stands, including zero, instead of falling back to the full
+            // length when the device reports no value. Runs before the release
+            // below frees it.
+            const size_t n = blockMode_ ? slot.len : std::min<size_t>(value_len, slot.len);
             std::memcpy(slot.user_buf, slot.op->staging, n);
         }
         spdk_shim_op_release(shim_, slot.op);
