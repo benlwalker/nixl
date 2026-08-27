@@ -42,6 +42,12 @@ if 'OBJ' in static_plugins
     nixl_lib_deps += [ obj_backend_interface ]
 endif
 
+# src/plugins/spdk errors out rather than skipping when SPDK is named here, so
+# the interface exists whenever this is true.
+if 'SPDK' in static_plugins
+    nixl_lib_deps += [ spdk_backend_interface ]
+endif
+
 disable_gds_backend = get_option('disable_gds_backend')
 if not disable_gds_backend and 'GDS' in static_plugins
     nixl_lib_deps += [ gds_backend_interface, cuda_dep ]

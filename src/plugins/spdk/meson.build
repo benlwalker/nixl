@@ -43,9 +43,22 @@ spdk_pc_components = ['spdk_nvme', 'spdk_vfio_user', 'spdk_env_dpdk']
 # run before acquiring one: a default `meson setup` reaches this file (SPDK is
 # in all_plugins), and on a host with no SPDK build the plugin must skip rather
 # than fail configuration.
+#
+# -Dstatic_plugins=SPDK is the exception. It has already put -DSTATIC_PLUGIN_SPDK
+# on the project arguments, so the plugin manager is compiling a reference to
+# createStaticSPDKPlugin() that only this subdir can define; skipping would leave
+# libnixl unlinkable. Naming a plugin there is an explicit request, so say why it
+# cannot be honored instead.
+spdk_skip_is_error = 'SPDK' in static_plugins
+spdk_skip_hint = ' (requested by -Dstatic_plugins=SPDK)'
+
 pkgconfig_prog = find_program('pkg-config', required: false)
 if not pkgconfig_prog.found()
-    warning('SPDK plugin disabled: pkg-config not found')
+    spdk_skip_why = 'pkg-config not found'
+    if spdk_skip_is_error
+        error('SPDK plugin' + spdk_skip_hint + ': ' + spdk_skip_why)
+    endif
+    warning('SPDK plugin disabled: ' + spdk_skip_why)
     subdir_done()
 endif
 
@@ -62,8 +75,12 @@ foreach spdk_pc_component : spdk_pc_components + ['spdk_syslibs']
     endif
 endforeach
 if not spdk_pc_ok
-    warning('SPDK plugin disabled: SPDK pkg-config components not found' +
-            (spdk_root != '' ? ' under ' + spdk_root : ''))
+    spdk_skip_why = 'SPDK pkg-config components not found' + \
+                    (spdk_root != '' ? ' under ' + spdk_root : '')
+    if spdk_skip_is_error
+        error('SPDK plugin' + spdk_skip_hint + ': ' + spdk_skip_why)
+    endif
+    warning('SPDK plugin disabled: ' + spdk_skip_why)
     subdir_done()
 endif
 
@@ -87,7 +104,11 @@ foreach spdk_inc_path : spdk_inc_paths
     endif
 endforeach
 if not spdk_have_kv
-    warning('SPDK plugin disabled: spdk/nvme_kv.h not found in the SPDK include path')
+    spdk_skip_why = 'spdk/nvme_kv.h not found in the SPDK include path'
+    if spdk_skip_is_error
+        error('SPDK plugin' + spdk_skip_hint + ': ' + spdk_skip_why)
+    endif
+    warning('SPDK plugin disabled: ' + spdk_skip_why)
     subdir_done()
 endif
 
@@ -204,7 +225,13 @@ else
 endif
 
 if 'SPDK' in static_plugins
-    spdk_backend_interface = declare_dependency(link_whole: spdk_backend_lib)
+    # link_args on the static_library above describes how to link the archive's
+    # own objects, and meson does not propagate it to whoever links the archive.
+    # libnixl is the one doing the real link in this configuration, so the SPDK
+    # closure has to ride the dependency or every lib/nvme symbol comes out
+    # undefined.
+    spdk_backend_interface = declare_dependency(link_whole: spdk_backend_lib,
+                                                link_args: spdk_link_args)
 else
     spdk_backend_interface = declare_dependency(link_with: spdk_backend_lib)
 endif
