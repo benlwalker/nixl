@@ -80,7 +80,7 @@ spdk_fence_poisoned(const struct spdk_fence *f) {
 }
 
 int
-spdk_fence_quarantine(struct spdk_fence *f, void *buf) {
+spdk_fence_quarantine(struct spdk_fence *f, void *buf, void (*free_fn)(void *)) {
     struct spdk_quarantine_node *n;
 
     if (buf == NULL) {
@@ -91,20 +91,21 @@ spdk_fence_quarantine(struct spdk_fence *f, void *buf) {
         return -ENOMEM;
     }
     n->buf = buf;
+    n->free_fn = free_fn;
     n->next = f->quarantine;
     f->quarantine = n;
     return 0;
 }
 
 void
-spdk_fence_drain(struct spdk_fence *f, void (*free_buf)(void *)) {
+spdk_fence_drain(struct spdk_fence *f) {
     struct spdk_quarantine_node *n = f->quarantine;
 
     while (n != NULL) {
         struct spdk_quarantine_node *next = n->next;
 
-        if (free_buf != NULL) {
-            free_buf(n->buf);
+        if (n->free_fn != NULL) {
+            n->free_fn(n->buf);
         }
         free(n);
         n = next;

@@ -44,9 +44,14 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/** A quarantined staging buffer awaiting release after the fencing teardown. */
+/**
+ * A quarantined allocation awaiting release after the fencing teardown. Each
+ * node carries its own releaser, because the quarantine holds two kinds of
+ * allocation with different frees: staging buffers (DMA) and op structures.
+ */
 struct spdk_quarantine_node {
     void *buf;
+    void (*free_fn)(void *);
     struct spdk_quarantine_node *next;
 };
 
@@ -63,8 +68,8 @@ struct spdk_fence {
      * drain() after a fencing teardown.
      */
     bool poisoned;
-    /* Staging buffers from poisoned ops, released only once drain() runs after
-     * the fencing teardown proves the tracker dead. */
+    /* Staging buffers and op structures from poisoned ops, released only once
+     * drain() runs after the fencing teardown proves the tracker dead. */
     struct spdk_quarantine_node *quarantine;
 };
 
@@ -131,22 +136,24 @@ bool
 spdk_fence_poisoned(const struct spdk_fence *f);
 
 /**
- * Quarantine staging buffer \c buf whose op left a possibly-live DMA tracker,
- * deferring its free to drain(). \c buf == NULL is a no-op. Returns 0 on
- * success, or -ENOMEM if the quarantine node could not be allocated -- in which
- * case the caller MUST NOT free \c buf (leaking it is strictly safer than a
- * use-after-free into memory the recovered target may still DMA into).
+ * Quarantine \c buf, an allocation the hardware may still reach because its op
+ * left a possibly-live tracker, deferring its release to drain(). \c free_fn is
+ * the releaser drain() will call for it. \c buf == NULL is a no-op. Returns 0
+ * on success, or -ENOMEM if the quarantine node could not be allocated -- in
+ * which case the caller MUST NOT free \c buf (leaking it is strictly safer than
+ * a use-after-free into memory the recovered target may still write to).
  */
 int
-spdk_fence_quarantine(struct spdk_fence *f, void *buf);
+spdk_fence_quarantine(struct spdk_fence *f, void *buf, void (*free_fn)(void *));
 
 /**
- * Release every quarantined buffer with \c free_buf (invoked exactly once per
- * buffer), empty the quarantine, and clear the poison latch. MUST be called
- * only after a fencing teardown (qpair free / ctrlr reset) has proven the
- * hardware trackers dead, so no completion can reference a freed buffer.
+ * Release every quarantined allocation through the releaser it was quarantined
+ * with (invoked exactly once each), empty the quarantine, and clear the poison
+ * latch. MUST be called only after a fencing teardown (qpair free / ctrlr
+ * reset) has proven the hardware trackers dead, so no completion can reference
+ * a freed allocation.
  */
 void
-spdk_fence_drain(struct spdk_fence *f, void (*free_buf)(void *));
+spdk_fence_drain(struct spdk_fence *f);
 
 #endif /* SPDK_FENCE_H */

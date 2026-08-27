@@ -106,12 +106,17 @@
 struct spdk_shim;
 
 /**
- * One in-flight operation. The caller owns the storage and must keep it alive
- * and unmoved from submit until the op is reaped, or until spdk_shim_close() if
- * the op was abandoned, since the hardware tracker may still write to it.
+ * One in-flight operation. The SHIM owns the storage: get one from
+ * spdk_shim_op_alloc() and hand it back with spdk_shim_op_release(), which
+ * either frees it or, if the op was abandoned with a possibly-live tracker,
+ * quarantines it until spdk_shim_close().
  *
- * The fields are public so a caller can embed an array of these in its own
- * request object instead of allocating one per op.
+ * The op is the completion callback's cb_arg and the SGL iterator's argument,
+ * so lib/nvme may write to it and may walk it again on a retry for as long as
+ * the tracker lives. That is why the caller cannot own it: giving up on an op
+ * (timeout, transport failure) does not abort its tracker, so its storage has
+ * to outlive the caller's interest in it. The fields stay public because the
+ * caller sets \c staging and reads it back on a staged READ.
  */
 struct spdk_shim_op {
     /* Completion slot and identity; also the submit call's cb_arg. */
@@ -284,7 +289,7 @@ spdk_shim_release_io_buf(struct spdk_shim *sh, void *buf);
  * transport-failed, leaving a possibly-live DMA tracker: every further submit is
  * then refused (-ESHUTDOWN) until spdk_shim_close(). Introspection only; the
  * datapath does not need to consult it, because spdk_shim_op_release() already
- * routes an abandoned op's staging buffer to the quarantine. Safe with
+ * routes an abandoned op and its staging buffer to the quarantine. Safe with
  * \c sh == NULL (returns false).
  */
 bool
@@ -359,11 +364,12 @@ uint32_t
 spdk_shim_max_value_len_op(const struct spdk_shim *sh);
 
 /**
- * Reset \c op to the clean, unsubmitted state. Call before each submit; an op
- * may be reused once it has been reaped.
+ * Allocate a clean, unsubmitted op. Returns NULL if \c sh is NULL or the
+ * allocation fails. Release it with spdk_shim_op_release() whether or not it
+ * was ever submitted; ops must not outlive spdk_shim_close().
  */
-void
-spdk_shim_op_init(struct spdk_shim_op *op);
+struct spdk_shim_op *
+spdk_shim_op_alloc(struct spdk_shim *sh);
 
 /**
  * Submit a KV Store of \c value (\c value_len bytes) under \c key. \c value
@@ -433,10 +439,12 @@ int
 spdk_shim_op_result(struct spdk_shim *sh, struct spdk_shim_op *op, uint32_t *value_len_out);
 
 /**
- * Release what \c op holds after its result has been read. Normally this frees
- * the staging buffer, but if the op was abandoned with a possibly-live tracker
- * the buffer is QUARANTINED instead and freed at the fencing teardown in
- * spdk_shim_close(). Safe on an op with no staging buffer.
+ * Release \c op and its staging buffer once its result has been read. Normally
+ * both are freed, but if the op was abandoned with a possibly-live tracker both
+ * are QUARANTINED instead and released at the fencing teardown in
+ * spdk_shim_close(). \c op must not be touched afterwards.
+ *
+ * Safe on an op that was never submitted, and on one with no staging buffer.
  */
 void
 spdk_shim_op_release(struct spdk_shim *sh, struct spdk_shim_op *op);

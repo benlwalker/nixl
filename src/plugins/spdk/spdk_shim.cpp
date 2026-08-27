@@ -162,12 +162,12 @@ expire_op(struct spdk_shim *sh, struct spdk_shim_op *op) {
     op->expired = true;
 }
 
-void
-spdk_shim_op_init(struct spdk_shim_op *op) {
-    if (op == NULL) {
-        return;
+struct spdk_shim_op *
+spdk_shim_op_alloc(struct spdk_shim *sh) {
+    if (sh == NULL) {
+        return NULL;
     }
-    memset(op, 0, sizeof(*op));
+    return static_cast<struct spdk_shim_op *>(calloc(1, sizeof(struct spdk_shim_op)));
 }
 
 bool
@@ -272,16 +272,35 @@ spdk_shim_op_result(struct spdk_shim *sh, struct spdk_shim_op *op, uint32_t *val
 
 void
 spdk_shim_op_release(struct spdk_shim *sh, struct spdk_shim_op *op) {
-    if (op == NULL || op->staging == NULL) {
+    if (sh == NULL || op == NULL) {
         return;
     }
+    /* Releasing an op that was never reaped still has to take it off the list,
+     * or the close-time backstop below would walk freed storage. */
+    if (op->submitted) {
+        inflight_remove(sh, op);
+    }
+    if (op->staging != NULL) {
+        /*
+         * spdk_shim_release_io_buf() frees on the healthy path and quarantines
+         * when the shim is poisoned, which is exactly the abandoned-op case:
+         * the tracker may still DMA into this buffer, so it must not go back to
+         * the heap.
+         */
+        spdk_shim_release_io_buf(sh, op->staging);
+        op->staging = NULL;
+    }
     /*
-     * spdk_shim_release_io_buf() frees on the healthy path and quarantines when
-     * the shim is poisoned, which is exactly the abandoned-op case: the tracker
-     * may still DMA into this buffer, so it must not go back to the heap.
+     * The op itself is the completion cb_arg and the SGL iterator's argument, so
+     * an abandoned op's storage is exactly as unsafe to free as its staging
+     * buffer. Quarantine it on the same terms, and leak it rather than free it
+     * if the quarantine node cannot be allocated.
      */
-    spdk_shim_release_io_buf(sh, op->staging);
-    op->staging = NULL;
+    if (op->tag.abandoned) {
+        (void)spdk_fence_quarantine(&sh->fence, op, free);
+        return;
+    }
+    free(op);
 }
 
 int
@@ -496,9 +515,10 @@ spdk_shim_close(struct spdk_shim *sh) {
         return;
     }
     /*
-     * Anything still in flight is being abandoned by the close itself. Route
-     * each op's staging buffer to the quarantine before the qpair goes away, so
-     * the drain below frees them exactly once.
+     * Backstop for ops the caller never released: the close abandons them, so
+     * route each one and its staging buffer to the quarantine before the qpair
+     * goes away and the drain below releases them exactly once. A caller that
+     * releases its ops leaves this list empty.
      */
     while (sh->inflight != NULL) {
         struct spdk_shim_op *op = sh->inflight;
@@ -508,9 +528,10 @@ spdk_shim_close(struct spdk_shim *sh) {
         op->submitted = false;
         spdk_fence_abandon(&op->tag);
         if (op->staging != NULL) {
-            (void)spdk_fence_quarantine(&sh->fence, op->staging);
+            (void)spdk_fence_quarantine(&sh->fence, op->staging, spdk_dma_free);
             op->staging = NULL;
         }
+        (void)spdk_fence_quarantine(&sh->fence, op, free);
     }
 
     if (sh->qpair != NULL) {
@@ -526,7 +547,7 @@ spdk_shim_close(struct spdk_shim *sh) {
      * on a timed-out / transport-failed op can no longer be DMA'd into, so free
      * them now (each exactly once) and clear the poison latch.
      */
-    spdk_fence_drain(&sh->fence, spdk_dma_free);
+    spdk_fence_drain(&sh->fence);
     if (sh->ctrlr != NULL) {
         spdk_nvme_detach(sh->ctrlr);
     }
@@ -600,7 +621,7 @@ spdk_shim_release_io_buf(struct spdk_shim *sh, void *buf) {
      * pressure is strictly safer than a use-after-free.
      */
     if (sh != NULL && spdk_fence_poisoned(&sh->fence)) {
-        (void)spdk_fence_quarantine(&sh->fence, buf);
+        (void)spdk_fence_quarantine(&sh->fence, buf, spdk_dma_free);
         return;
     }
     spdk_dma_free(buf);
@@ -953,12 +974,17 @@ spdk_shim_retrieve(struct spdk_shim *sh,
 
 /*
  * Exist is the one synchronous op: NIXL's queryMem has no asynchronous
- * contract, so this submits and polls inline against a local op rather than
- * handing the caller something to reap. It transfers no data, so it is short.
+ * contract, so this submits and polls inline rather than handing the caller
+ * something to reap. It transfers no data, so it is short.
+ *
+ * The op is still allocated rather than being a local, because polling inline
+ * does not make the tracker any easier to abort: an Exist that times out leaves
+ * a tracker that may still write through this op, so its storage has to survive
+ * this frame and reach the quarantine.
  */
 int
 spdk_shim_exist(struct spdk_shim *sh, const void *key, uint8_t key_len) {
-    struct spdk_shim_op op;
+    struct spdk_shim_op *op;
     int rc;
 
     if (sh == NULL) {
@@ -971,19 +997,24 @@ spdk_shim_exist(struct spdk_shim *sh, const void *key, uint8_t key_len) {
     if (sh->is_block) {
         return -EINVAL;
     }
-    spdk_shim_op_init(&op);
+    op = spdk_shim_op_alloc(sh);
+    if (op == NULL) {
+        return -ENOMEM;
+    }
     /* Refuse to submit onto a poisoned (timed-out / fenced) qpair. */
-    if (!spdk_fence_begin(&sh->fence, &op.tag)) {
+    if (!spdk_fence_begin(&sh->fence, &op->tag)) {
+        spdk_shim_op_release(sh, op);
         return -ESHUTDOWN;
     }
-    rc = spdk_nvme_kv_exist(sh->ns, sh->qpair, key, key_len, io_complete, &op);
+    rc = spdk_nvme_kv_exist(sh->ns, sh->qpair, key, key_len, io_complete, op);
     if (rc != 0) {
+        spdk_shim_op_release(sh, op);
         return rc < 0 ? rc : -rc;
     }
-    op.deadline = spdk_get_ticks() + (uint64_t)SPDK_SHIM_OP_TIMEOUT_S * spdk_get_ticks_hz();
-    inflight_push(sh, &op);
+    op->deadline = spdk_get_ticks() + (uint64_t)SPDK_SHIM_OP_TIMEOUT_S * spdk_get_ticks_hz();
+    inflight_push(sh, op);
 
-    while (!spdk_shim_op_done(&op)) {
+    while (!spdk_shim_op_done(op)) {
         rc = spdk_shim_poll(sh, 0);
         if (rc < 0) {
             break;
@@ -992,10 +1023,11 @@ spdk_shim_exist(struct spdk_shim *sh, const void *key, uint8_t key_len) {
     /*
      * op_result maps a GENERIC completion to its NVMe sc: 0x00 -> 0 (the key
      * exists / hit), 0x87 KEY_DOES_NOT_EXIST -> 0x87 (absent / miss). No value
-     * data is transferred either way. It also takes the op off the in-flight
-     * list, which matters here because the op is on this stack frame.
+     * data is transferred either way.
      */
-    return spdk_shim_op_result(sh, &op, NULL);
+    rc = spdk_shim_op_result(sh, op, NULL);
+    spdk_shim_op_release(sh, op);
+    return rc;
 }
 
 /*

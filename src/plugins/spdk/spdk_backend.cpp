@@ -88,7 +88,10 @@ public:
     // One shim op per non-empty descriptor, with the descriptor index it came
     // from (zero-length descriptors are skipped, so the indices have gaps).
     struct Op {
-        spdk_shim_op op{};
+        // Shim-owned: allocated by spdk_shim_op_alloc() at submit and handed
+        // back with spdk_shim_op_release(), which quarantines it if the op was
+        // abandoned with a live tracker. Null once released.
+        spdk_shim_op *op = nullptr;
         int desc = -1;
         void *user_buf = nullptr; // caller memory to copy a staged READ back into
         size_t len = 0;
@@ -628,25 +631,34 @@ nixlSpdkEngine::postXfer(const nixl_xfer_op_t &operation,
                     std::memcpy(io_buf, data_ptr, data_len);
                 }
             }
-            spdk_shim_op_init(&slot.op);
-            slot.op.staging = use_direct ? nullptr : io_buf;
+            // A demoted retry re-enters here, so drop the op the failed direct
+            // submit allocated before taking a fresh one.
+            spdk_shim_op_release(shim_, slot.op);
+            slot.op = spdk_shim_op_alloc(shim_);
+            if (!slot.op) {
+                if (!use_direct) {
+                    spdk_shim_dma_free(io_buf);
+                }
+                return -ENOMEM;
+            }
+            slot.op->staging = use_direct ? nullptr : io_buf;
             slot.staged = !use_direct;
             const int r = (operation == NIXL_WRITE) ?
                 spdk_shim_store(shim_,
-                                &slot.op,
+                                slot.op,
                                 key.data(),
                                 static_cast<uint8_t>(key.size()),
                                 io_buf,
                                 static_cast<uint32_t>(data_len)) :
                 spdk_shim_retrieve(shim_,
-                                   &slot.op,
+                                   slot.op,
                                    key.data(),
                                    static_cast<uint8_t>(key.size()),
                                    io_buf,
                                    static_cast<uint32_t>(data_len));
             if (r != 0 && !use_direct) {
                 spdk_shim_dma_free(io_buf);
-                slot.op.staging = nullptr;
+                slot.op->staging = nullptr;
             }
             return r;
         };
@@ -809,15 +821,24 @@ nixlSpdkEngine::postXferBlock(const nixl_xfer_op_t &operation,
                     std::memcpy(io_buf, data_ptr, data_len);
                 }
             }
-            spdk_shim_op_init(&slot.op);
-            slot.op.staging = use_direct ? nullptr : io_buf;
+            // A demoted retry re-enters here, so drop the op the failed direct
+            // submit allocated before taking a fresh one.
+            spdk_shim_op_release(shim_, slot.op);
+            slot.op = spdk_shim_op_alloc(shim_);
+            if (!slot.op) {
+                if (!use_direct) {
+                    spdk_shim_dma_free(io_buf);
+                }
+                return -ENOMEM;
+            }
+            slot.op->staging = use_direct ? nullptr : io_buf;
             slot.staged = !use_direct;
             const int r = (operation == NIXL_WRITE) ?
-                spdk_shim_write(shim_, &slot.op, io_buf, lba, nlba) :
-                spdk_shim_read(shim_, &slot.op, io_buf, lba, nlba);
+                spdk_shim_write(shim_, slot.op, io_buf, lba, nlba) :
+                spdk_shim_read(shim_, slot.op, io_buf, lba, nlba);
             if (r != 0 && !use_direct) {
                 spdk_shim_dma_free(io_buf);
-                slot.op.staging = nullptr;
+                slot.op->staging = nullptr;
             }
             return r;
         };
@@ -877,11 +898,11 @@ void
 nixlSpdkEngine::reapOps(nixlBackendReqH *handle) const {
     auto *req_h = static_cast<nixlSpdkBackendReqH *>(handle);
     for (auto &slot : req_h->ops) {
-        if (slot.reaped || !spdk_shim_op_done(&slot.op)) {
+        if (slot.reaped || slot.op == nullptr || !spdk_shim_op_done(slot.op)) {
             continue;
         }
         uint32_t value_len = 0;
-        const int rc = spdk_shim_op_result(shim_, &slot.op, &value_len);
+        const int rc = spdk_shim_op_result(shim_, slot.op, &value_len);
         slot.reaped = true;
         --req_h->outstanding;
 
@@ -891,9 +912,10 @@ nixlSpdkEngine::reapOps(nixlBackendReqH *handle) const {
             // staging buffer is not zeroed, so its untouched tail must never
             // reach the caller. Runs before the release below frees it.
             const size_t n = value_len != 0 ? std::min<size_t>(value_len, slot.len) : slot.len;
-            std::memcpy(slot.user_buf, slot.op.staging, n);
+            std::memcpy(slot.user_buf, slot.op->staging, n);
         }
-        spdk_shim_op_release(shim_, &slot.op);
+        spdk_shim_op_release(shim_, slot.op);
+        slot.op = nullptr;
 
         if (req_h->is_read && rc == SPDK_SHIM_SC_BUFFER_TOO_SMALL) {
             // Value auto-sizing: the stored value is longer than the host

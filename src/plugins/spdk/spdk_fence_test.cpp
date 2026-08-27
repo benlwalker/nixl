@@ -139,7 +139,7 @@ test_poison_refuses_submits(void) {
     CHECK(!spdk_fence_begin(&f, &tag));
 
     /* Fencing teardown drains + clears poison; then ops resume. */
-    spdk_fence_drain(&f, counting_free);
+    spdk_fence_drain(&f);
     CHECK(!spdk_fence_poisoned(&f));
     CHECK(spdk_fence_begin(&f, &tag));
 }
@@ -154,16 +154,16 @@ test_quarantine_freed_once(void) {
     spdk_fence_init(&f);
     spdk_fence_poison(&f);
 
-    CHECK(spdk_fence_quarantine(&f, &buf0) == 0);
-    CHECK(spdk_fence_quarantine(&f, &buf1) == 0);
-    CHECK(spdk_fence_quarantine(&f, &buf2) == 0);
+    CHECK(spdk_fence_quarantine(&f, &buf0, counting_free) == 0);
+    CHECK(spdk_fence_quarantine(&f, &buf1, counting_free) == 0);
+    CHECK(spdk_fence_quarantine(&f, &buf2, counting_free) == 0);
     /* NULL is a no-op, never counted. */
-    CHECK(spdk_fence_quarantine(&f, NULL) == 0);
+    CHECK(spdk_fence_quarantine(&f, NULL, counting_free) == 0);
 
     /* Nothing is freed before the fencing teardown. */
     CHECK(g_free_calls == 0);
 
-    spdk_fence_drain(&f, counting_free);
+    spdk_fence_drain(&f);
     CHECK(g_free_calls == 3);
     CHECK(freed_count(&buf0) == 1);
     CHECK(freed_count(&buf1) == 1);
@@ -171,7 +171,7 @@ test_quarantine_freed_once(void) {
 
     /* Quarantine emptied and poison cleared: a second drain frees nothing. */
     g_free_calls = 0;
-    spdk_fence_drain(&f, counting_free);
+    spdk_fence_drain(&f);
     CHECK(g_free_calls == 0);
     CHECK(!spdk_fence_poisoned(&f));
 }
@@ -193,14 +193,14 @@ test_fenced_flow(void) {
     CHECK(spdk_fence_begin(&f, &tag)); /* submit op A */
     spdk_fence_poison(&f); /* poll timed out */
     /* Backend releases the staging buffer: poisoned => quarantined, not freed. */
-    CHECK(spdk_fence_quarantine(&f, &staging) == 0);
+    CHECK(spdk_fence_quarantine(&f, &staging, counting_free) == 0);
     CHECK(g_free_calls == 0);
 
     /* No later op can be submitted onto the fenced qpair. */
     CHECK(!spdk_fence_begin(&f, &tag));
 
     /* close(): free_io_qpair() proves the tracker dead, then drain releases. */
-    spdk_fence_drain(&f, counting_free);
+    spdk_fence_drain(&f);
     CHECK(freed_count(&staging) == 1);
     CHECK(!spdk_fence_poisoned(&f));
 }
