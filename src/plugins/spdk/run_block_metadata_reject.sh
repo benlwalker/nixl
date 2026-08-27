@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-FileCopyrightText: Copyright (c) 2026 IBM Corporation
+# SPDX-FileCopyrightText: Copyright (c) 2026 IBM Corporation. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Negative test for the block open guard: brings up an SPDK nvmf target with a

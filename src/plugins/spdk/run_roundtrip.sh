@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-FileCopyrightText: Copyright (c) 2026 IBM Corporation
+# SPDX-FileCopyrightText: Copyright (c) 2026 IBM Corporation. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Brings up an SPDK nvmf target with an in-memory KV namespace (kvdev_mem, no
