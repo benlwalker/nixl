@@ -671,6 +671,8 @@ nixlSpdkEngine::postXfer(const nixl_xfer_op_t &operation,
         }
         if (rc != 0) {
             NIXL_ERROR << "SPDK: descriptor " << i << " submit failed: rc=" << rc;
+            // The op never reached the qpair, so this frees it outright.
+            spdk_shim_op_release(shim_, req_h->ops.back().op);
             req_h->ops.pop_back();
             req_h->status = NIXL_ERR_BACKEND;
             return NIXL_ERR_BACKEND;
@@ -851,6 +853,8 @@ nixlSpdkEngine::postXferBlock(const nixl_xfer_op_t &operation,
         }
         if (rc != 0) {
             NIXL_ERROR << "SPDK: block descriptor " << i << " submit failed: rc=" << rc;
+            // The op never reached the qpair, so this frees it outright.
+            spdk_shim_op_release(shim_, req_h->ops.back().op);
             req_h->ops.pop_back();
             req_h->status = NIXL_ERR_BACKEND;
             return NIXL_ERR_BACKEND;
@@ -953,18 +957,25 @@ nixlSpdkEngine::releaseReqH(nixlBackendReqH *handle) const {
         return NIXL_ERR_INVALID_PARAM;
     }
     auto *req_h = static_cast<nixlSpdkBackendReqH *>(handle);
-    // The ops live in the handle and the device writes into them until they
-    // complete or are abandoned, so this cannot free them while any is
-    // outstanding. Draining is bounded rather than open-ended, because the poll
-    // expires an op once it passes its deadline.
-    if (req_h->outstanding != 0) {
+    {
         NIXL_LOCK_GUARD(shim_lock_);
+        // Drain first so an op that is merely slow is reaped normally rather
+        // than abandoned. This is bounded rather than open-ended, because the
+        // poll expires an op once it passes its deadline.
         while (req_h->outstanding != 0 && shim_ != nullptr) {
             if (spdk_shim_poll(shim_, 0) < 0) {
                 reapOps(req_h);
                 break;
             }
             reapOps(req_h);
+        }
+        // Whatever is left was abandoned by that expiry, and its tracker may
+        // still write to it. Hand each one back so the shim quarantines it
+        // until spdk_shim_close(); dropping the handle's vector on the floor
+        // would strand it instead.
+        for (auto &slot : req_h->ops) {
+            spdk_shim_op_release(shim_, slot.op);
+            slot.op = nullptr;
         }
     }
     delete req_h;
