@@ -97,9 +97,8 @@ test_stale_orphan_discarded(void) {
 
     spdk_fence_init(&f);
 
-    CHECK(spdk_fence_begin(&f, &tag_a)); /* gen N   */
-    CHECK(spdk_fence_begin(&f, &tag_b)); /* gen N+1 */
-    CHECK(tag_a.gen != tag_b.gen);
+    CHECK(spdk_fence_begin(&f, &tag_a));
+    CHECK(spdk_fence_begin(&f, &tag_b));
 
     /* The submitter gives up on A; both are still in flight as far as the
      * device is concerned. */
@@ -125,19 +124,16 @@ static void
 test_poison_refuses_submits(void) {
     struct spdk_fence f;
     struct spdk_op_tag tag;
-    uint64_t gen_before;
 
     spdk_fence_init(&f);
     CHECK(spdk_fence_begin(&f, &tag));
-    gen_before = f.gen;
 
     /* spdk_shim_poll() latches this on -ETIMEDOUT / -ENXIO. */
     spdk_fence_poison(&f);
     CHECK(spdk_fence_poisoned(&f));
 
-    /* Refused, and the generation does not advance (no new op started). */
+    /* Refused: no new op starts while the fence is poisoned. */
     CHECK(!spdk_fence_begin(&f, &tag));
-    CHECK(f.gen == gen_before);
     /* Idempotent poison. */
     spdk_fence_poison(&f);
     CHECK(!spdk_fence_begin(&f, &tag));

@@ -27,7 +27,6 @@
 
 void
 spdk_fence_init(struct spdk_fence *f) {
-    f->gen = 0;
     f->poisoned = false;
     f->quarantine = NULL;
 }
@@ -37,9 +36,7 @@ spdk_fence_begin(struct spdk_fence *f, struct spdk_op_tag *tag) {
     if (f->poisoned) {
         return false;
     }
-    f->gen++;
     tag->fence = f;
-    tag->gen = f->gen;
     tag->op_done = false;
     tag->op_sct = 0;
     tag->op_sc = 0;

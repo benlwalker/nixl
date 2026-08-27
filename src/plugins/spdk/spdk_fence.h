@@ -57,12 +57,6 @@ struct spdk_quarantine_node {
  */
 struct spdk_fence {
     /*
-     * Monotonic op counter. Each begin() stamps the next value into the tag, so
-     * every op carries a distinct identity for logging and for telling two
-     * in-flight ops apart in a trace.
-     */
-    uint64_t gen;
-    /*
      * Latched true once a timeout / transport failure left a possibly-live DMA
      * tracker. While set, begin() refuses every new op so no later op can be
      * corrupted by the orphan or DMA into a freed buffer; cleared only by
@@ -81,8 +75,6 @@ struct spdk_fence {
  */
 struct spdk_op_tag {
     struct spdk_fence *fence;
-    /* This op's identity, stamped by begin() from the fence's counter. */
-    uint64_t gen;
     /* Completion, written by the callback and read after the poll. */
     volatile bool op_done;
     volatile uint8_t op_sct;
@@ -103,9 +95,8 @@ spdk_fence_init(struct spdk_fence *f);
 
 /**
  * Begin a new op. If the fence is poisoned, refuse (return false, change
- * nothing). Otherwise stamp \c tag with the next generation and clear its
- * completion slot, and return true. Hand \c tag to the submit call as its
- * completion cb_arg.
+ * nothing). Otherwise clear \c tag's completion slot and return true. Hand
+ * \c tag to the submit call as its completion cb_arg.
  */
 bool
 spdk_fence_begin(struct spdk_fence *f, struct spdk_op_tag *tag);

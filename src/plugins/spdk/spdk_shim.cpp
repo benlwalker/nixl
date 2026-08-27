@@ -117,10 +117,10 @@ attach_cb(void *cb_ctx,
 static void
 io_complete(void *arg, const struct spdk_nvme_cpl *cpl) {
     /*
-     * cb_arg is the per-op tag stamped at submit, NOT the shim: the fence
-     * discards a completion whose generation no longer matches the op the
-     * poller is waiting for, so a late orphan from a timed-out op cannot be
-     * mis-recorded as the current op's status.
+     * cb_arg is the op, NOT the shim, so each completion lands in its own tag
+     * and concurrent ops never share a slot. A late orphan from an op the
+     * submitter already gave up on is discarded by the tag's abandoned flag,
+     * which is why an abandoned op's storage must outlive it.
      */
     spdk_fence_complete(
         &static_cast<struct spdk_shim_op *>(arg)->tag, cpl->status.sct, cpl->status.sc, cpl->cdw0);
