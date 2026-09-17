@@ -148,6 +148,10 @@
 #define XFERBENCH_RANDOMIZE_LOCATION_MODE_BLOCK_ALIGNED "blockaligned"
 #define XFERBENCH_RANDOMIZE_LOCATION_MODE_BYTE_ALIGNED "bytealigned"
 
+// DOCA_MEMOS object key modes
+#define XFERBENCH_DOCA_MEMOS_KEY_MODE_SEQUENTIAL "sequential"
+#define XFERBENCH_DOCA_MEMOS_KEY_MODE_RANDOM "random"
+
 #define IS_PAIRWISE_AND_SG()                                 \
     (XFERBENCH_SCHEME_PAIRWISE == xferBenchConfig::scheme && \
      XFERBENCH_MODE_SG == xferBenchConfig::mode)
@@ -234,6 +238,8 @@ public:
     static std::string doca_memos_query_mem_mode;
     static std::string doca_memos_nguid;
     static bool doca_memos_ignore_read_not_found;
+    static std::string doca_memos_key_mode;
+    static uint64_t doca_memos_key_seed;
 
     static int
     parseConfig(int argc, char *argv[]);

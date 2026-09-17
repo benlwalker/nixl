@@ -89,6 +89,7 @@ class xferBenchNixlWorker: public xferBenchWorker {
         getFileOffset(size_t current_offset, size_t max_offset_in_blocks, size_t block_size);
 
         std::mt19937_64 default_rng_;
+        std::mt19937_64 doca_memos_key_rng_;
 };
 
 #endif // NIXL_BENCHMARK_NIXLBENCH_SRC_WORKER_NIXL_NIXL_WORKER_H

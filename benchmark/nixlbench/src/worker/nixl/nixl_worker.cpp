@@ -16,6 +16,7 @@
  */
 
 #include "worker/nixl/nixl_worker.h"
+#include "worker/nixl/doca_memos_key_generator.h"
 #include <algorithm>
 #include <cassert>
 #include <cctype>
@@ -27,6 +28,7 @@
 #include <memory>
 #include <numeric>
 #include <sstream>
+#include <unordered_set>
 #include "utils/neuron.h"
 #include "utils/utils.h"
 #include <unistd.h>
@@ -106,9 +108,26 @@ getRandomSeed() {
     return seed;
 }
 
+static uint64_t
+getDocaMemosKeySeed() {
+    if (xferBenchConfig::doca_memos_key_seed != 0) {
+        return xferBenchConfig::doca_memos_key_seed;
+    }
+
+    std::random_device rd;
+    const uint64_t seed = (static_cast<uint64_t>(rd()) << 32) | rd();
+    xferBenchConfig::doca_memos_key_seed = seed;
+    return seed;
+}
+
 xferBenchNixlWorker::xferBenchNixlWorker(const std::vector<std::string> &devices)
     : xferBenchWorker(),
       default_rng_(getRandomSeed()) {
+    if (xferBenchConfig::backend == XFERBENCH_BACKEND_DOCA_MEMOS &&
+        xferBenchConfig::doca_memos_key_mode == XFERBENCH_DOCA_MEMOS_KEY_MODE_RANDOM) {
+        doca_memos_key_rng_.seed(getDocaMemosKeySeed());
+    }
+
     seg_type = GET_SEG_TYPE(isInitiator());
 
     int rank;
@@ -1018,13 +1037,18 @@ xferBenchNixlWorker::allocateMemory(int num_threads) {
     if (xferBenchConfig::backend == XFERBENCH_BACKEND_DOCA_MEMOS) {
         size_t max_batch = xferBenchConfig::max_batch_size;
         size_t total_keys = 0;
+        const bool randomize_keys =
+            xferBenchConfig::doca_memos_key_mode == XFERBENCH_DOCA_MEMOS_KEY_MODE_RANDOM;
+        std::unordered_set<std::string> generated_keys;
         for (int list_idx = 0; list_idx < num_threads; list_idx++) {
             std::vector<xferBenchIOV> iov_list;
             for (i = 0; i < num_devices; i++) {
                 for (size_t b = 0; b < max_batch; b++) {
                     int dev_id =
                         static_cast<int>(list_idx * num_devices * max_batch + i * max_batch + b);
-                    auto basic_desc = initBasicDescObj(buffer_size, dev_id, "");
+                    std::string key = nixlbench::makeDocaMemosObjectKey(
+                        randomize_keys, doca_memos_key_rng_, generated_keys);
+                    auto basic_desc = initBasicDescObj(buffer_size, dev_id, std::move(key));
                     if (basic_desc) {
                         iov_list.push_back(basic_desc.value());
                     }
@@ -1035,7 +1059,8 @@ xferBenchNixlWorker::allocateMemory(int num_threads) {
             total_keys += iov_list.size();
             remote_iovs.push_back(iov_list);
         }
-        std::cout << "DOCA_MEMOS: Registered " << total_keys << " keys across " << num_threads
+        std::cout << "DOCA_MEMOS: Registered " << total_keys
+                  << (randomize_keys ? " random" : " sequential") << " keys across " << num_threads
                   << " threads x " << num_devices << " devices x " << max_batch << " batch"
                   << std::endl;
     } else if (xferBenchConfig::isObjStorageBackend()) {

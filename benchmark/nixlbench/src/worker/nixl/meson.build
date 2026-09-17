@@ -16,6 +16,7 @@
 nixl_worker_sources = [
   'nixl_worker.cpp',
   'nixl_worker.h',
+  'doca_memos_key_generator.h',
   'nixl_mem_region.cpp',
   'nixl_mem_region.h',
 ]
