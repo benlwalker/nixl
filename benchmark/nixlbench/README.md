@@ -501,6 +501,17 @@ sudo systemctl start etcd && sudo systemctl enable etcd
 --gds_mt_num_threads NUM   # Number of threads used by GDS MT plugin (default: 1)
 ```
 
+**DOCA_MEMOS Backend:**
+```
+--doca_memos_key_mode MODE  # Object key mode [sequential, random] (default: sequential)
+--doca_memos_key_seed NUM   # Seed for random object keys; 0 generates a seed at startup
+```
+
+Random mode registers a unique random 128-bit object key for each benchmark key
+slot. A nonzero seed reproduces the same key set for the same benchmark shape.
+Key identity is independent of `--randomize_location_mode`, which controls
+access order and offsets for backends that support it.
+
 **POSIX Backend:**
 ```
 --posix_api_type TYPE      # API type for POSIX operations [AIO, URING, POSIXAIO] (default: AIO)

@@ -318,6 +318,7 @@ subdir('src/utils')
 subdir('src/runtime')
 subdir('src/worker')
 subdir('src/kernels')
+subdir('tests')
 
 # Configure header file
 configure_file(

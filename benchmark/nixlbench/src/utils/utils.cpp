@@ -251,6 +251,12 @@ NB_ARG_STRING(doca_memos_nguid, "", "DOCA_MEMOS namespace GUID (32 hex chars, op
 NB_ARG_BOOL(doca_memos_ignore_read_not_found,
             false,
             "DOCA_MEMOS: treat key-not-found on read as success");
+NB_ARG_STRING(doca_memos_key_mode,
+              XFERBENCH_DOCA_MEMOS_KEY_MODE_SEQUENTIAL,
+              "DOCA_MEMOS object key mode [sequential, random]");
+NB_ARG_UINT64(doca_memos_key_seed,
+              0,
+              "Seed for random DOCA_MEMOS object keys; 0 generates a seed at startup");
 
 #undef NB_ARG_INT32
 #undef NB_ARG_UINT32
@@ -336,6 +342,8 @@ int xferBenchConfig::doca_memos_num_tasks = 8192;
 std::string xferBenchConfig::doca_memos_query_mem_mode = "assume_success";
 std::string xferBenchConfig::doca_memos_nguid = "";
 bool xferBenchConfig::doca_memos_ignore_read_not_found = false;
+std::string xferBenchConfig::doca_memos_key_mode = XFERBENCH_DOCA_MEMOS_KEY_MODE_SEQUENTIAL;
+uint64_t xferBenchConfig::doca_memos_key_seed = 0;
 
 int
 xferBenchConfig::parseConfig(int argc, char *argv[]) {
@@ -470,6 +478,8 @@ xferBenchConfig::loadParams(void) {
             doca_memos_query_mem_mode = NB_ARG(doca_memos_query_mem_mode);
             doca_memos_nguid = NB_ARG(doca_memos_nguid);
             doca_memos_ignore_read_not_found = NB_ARG(doca_memos_ignore_read_not_found);
+            doca_memos_key_mode = NB_ARG(doca_memos_key_mode);
+            doca_memos_key_seed = NB_ARG(doca_memos_key_seed);
 
             // The generic consistency check reads written data back through the
             // S3/Azure object helpers, which DOCA_MEMOS does not implement. The
@@ -589,6 +599,15 @@ xferBenchConfig::loadParams(void) {
     }
 
     // Validate randomization mode
+    if (backend == XFERBENCH_BACKEND_DOCA_MEMOS &&
+        doca_memos_key_mode != XFERBENCH_DOCA_MEMOS_KEY_MODE_SEQUENTIAL &&
+        doca_memos_key_mode != XFERBENCH_DOCA_MEMOS_KEY_MODE_RANDOM) {
+        std::cerr << "Invalid doca_memos_key_mode: " << doca_memos_key_mode
+                  << " valid modes are " << XFERBENCH_DOCA_MEMOS_KEY_MODE_SEQUENTIAL << ", "
+                  << XFERBENCH_DOCA_MEMOS_KEY_MODE_RANDOM << std::endl;
+        return -1;
+    }
+
     if (isStorageBackend()) {
         if (randomize_location_mode != XFERBENCH_RANDOMIZE_LOCATION_MODE_NONE &&
             randomize_location_mode != XFERBENCH_RANDOMIZE_LOCATION_MODE_BLOCK_ALIGNED &&
@@ -787,6 +806,23 @@ xferBenchConfig::printConfig() {
         if (backend == XFERBENCH_BACKEND_GDS_MT) {
             printOption("GDS MT Number of threads (--gds_mt_num_threads=N)",
                         std::to_string(gds_mt_num_threads));
+        }
+
+        if (backend == XFERBENCH_BACKEND_DOCA_MEMOS) {
+            printOption("DOCA_MEMOS device name (--doca_memos_device_name=path)",
+                        doca_memos_device_name);
+            printOption("DOCA_MEMOS number of tasks (--doca_memos_num_tasks=N)",
+                        std::to_string(doca_memos_num_tasks));
+            printOption("DOCA_MEMOS query mode "
+                        "(--doca_memos_query_mem_mode=[assume_success,actual])",
+                        doca_memos_query_mem_mode);
+            printOption("DOCA_MEMOS object key mode "
+                        "(--doca_memos_key_mode=[sequential,random])",
+                        doca_memos_key_mode);
+            if (doca_memos_key_mode == XFERBENCH_DOCA_MEMOS_KEY_MODE_RANDOM) {
+                printOption("DOCA_MEMOS object key seed (--doca_memos_key_seed=N)",
+                            std::to_string(doca_memos_key_seed));
+            }
         }
 
         // Print POSIX options if backend is POSIX
