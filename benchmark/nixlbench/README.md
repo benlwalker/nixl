@@ -1236,3 +1236,36 @@ sudo sysctl -p
 ---
 
 *This guide covers NIXLBench build and usage procedures as of 2025. For the latest updates, please refer to the official repository.*
+
+### DOCA_MEMOS working-set size
+
+By default, DOCA_MEMOS registers only `max_batch_size` keys per thread/device.
+Increasing `total_buffer_size` alone does not increase the number of stored keys.
+To vary the storage working set independently of batch size, set:
+
+```bash
+export NIXLBENCH_MEMOS_KEYS_PER_THREAD=2048
+```
+
+With eight threads, a fixed batch size of 32, and 512 KiB values, this registers
+16,384 distinct keys and exercises an 8 GiB working set. Set
+`--total_buffer_size=8589934592` so each worker has sufficient local buffer space.
+For other block sizes, choose a key count that is a multiple of the batch size;
+for an approximately 8 GiB total working set with eight threads, use
+`floor(1 GiB / block_size / batch_size) * batch_size` keys per thread.
+
+The benchmark prepares one transfer request per batch of keys and cycles through
+those requests in order. Only one batch per worker is in flight, so this option
+does not increase I/O depth. READ prepopulation and its retrieval-success check
+visit every key before warmup and measurement. Each phase starts at the first
+batch; a short measurement may visit only part of the pool. The retrieval check
+is not a data-integrity checksum. Request preparation is still included in the
+existing execution-loop timing; larger pools create more request handles.
+
+The option accepts decimal integers from 1 through 1,000,000. It requires the
+NIXL worker, DOCA_MEMOS READ or WRITE, DRAM, one device per side, SG/pairwise mode,
+`pipeline_depth=1`, and a fixed batch size. Request recreation, memory
+reregistration, QUERY, and location randomization are unsupported and rejected.
+The full pool must fit in each thread's buffer at `max_block_size`. Existing
+random 128-bit object keys remain independent across threads and runs. Unset the
+environment variable to retain the default transfer path and key count.

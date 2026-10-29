@@ -37,6 +37,7 @@
 #include "runtime/etcd/etcd_rt.h"
 #include "utils/neuron.h"
 #include "utils/utils.h"
+#include "utils/memos_key_pool.h"
 
 namespace {
 
@@ -418,6 +419,7 @@ bool xferBenchConfig::storage_enable_direct = false;
 bool xferBenchConfig::reregister_mem = false;
 bool xferBenchConfig::prepared_xfer = false;
 int xferBenchConfig::pipeline_depth = 1;
+size_t xferBenchConfig::memos_keys_per_thread = 0;
 long xferBenchConfig::page_size = sysconf(_SC_PAGESIZE);
 std::string xferBenchConfig::obj_access_key = "";
 std::string xferBenchConfig::obj_secret_key = "";
@@ -934,6 +936,36 @@ xferBenchConfig::loadParams(void) {
             std::cout << "Using address " << asio_address << " port " << asio_port
                       << " for ASIO runtime" << std::endl;
         }
+    }
+
+    try {
+        memos_keys_per_thread =
+            nixlbench::parseMemosKeyPoolSize(std::getenv("NIXLBENCH_MEMOS_KEYS_PER_THREAD"));
+        if (memos_keys_per_thread != 0) {
+            if (worker_type != XFERBENCH_WORKER_NIXL || backend != XFERBENCH_BACKEND_DOCA_MEMOS ||
+                (op_type != XFERBENCH_OP_READ && op_type != XFERBENCH_OP_WRITE) ||
+                initiator_seg_type != XFERBENCH_SEG_TYPE_DRAM || num_initiator_dev != 1 ||
+                num_target_dev != 1 || mode != XFERBENCH_MODE_SG ||
+                scheme != XFERBENCH_SCHEME_PAIRWISE || pipeline_depth != 1 ||
+                start_batch_size != max_batch_size || recreate_xfer || reregister_mem ||
+                randomize_location_mode != XFERBENCH_RANDOMIZE_LOCATION_MODE_NONE) {
+                throw std::invalid_argument(
+                    "requires NIXL/DOCA_MEMOS READ or WRITE, DRAM, one device per side, "
+                    "SG/pairwise, pipeline_depth=1, fixed batch size, no request recreation, "
+                    "memory reregistration or location randomization");
+            }
+            nixlbench::validateMemosKeyPoolSize(memos_keys_per_thread,
+                                                max_batch_size,
+                                                max_block_size,
+                                                total_buffer_size,
+                                                num_threads > 0 ? num_threads : 0);
+            std::cout << "DOCA_MEMOS: " << memos_keys_per_thread << " distinct keys per thread, "
+                      << max_batch_size << " keys per transfer" << std::endl;
+        }
+    }
+    catch (const std::invalid_argument &error) {
+        std::cerr << "Invalid NIXLBENCH_MEMOS_KEYS_PER_THREAD: " << error.what() << std::endl;
+        return -1;
     }
 
     // Validate backend-specific configurations

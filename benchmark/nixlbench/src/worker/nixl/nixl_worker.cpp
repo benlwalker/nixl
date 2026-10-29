@@ -1147,14 +1147,16 @@ xferBenchNixlWorker::allocateMemory(int num_threads) {
         // even when all clients specify the same location-randomization seed.
         // Generate only at registration; prepopulation and reads reuse these IOVs.
         std::random_device key_entropy;
-        size_t max_batch = xferBenchConfig::max_batch_size;
+        const size_t keys_per_thread = xferBenchConfig::memos_keys_per_thread != 0 ?
+            xferBenchConfig::memos_keys_per_thread :
+            xferBenchConfig::max_batch_size;
         size_t total_keys = 0;
         for (int list_idx = 0; list_idx < num_threads; list_idx++) {
             std::vector<xferBenchIOV> iov_list;
             for (i = 0; i < num_devices; i++) {
-                for (size_t b = 0; b < max_batch; b++) {
-                    int dev_id =
-                        static_cast<int>(list_idx * num_devices * max_batch + i * max_batch + b);
+                for (size_t b = 0; b < keys_per_thread; b++) {
+                    int dev_id = static_cast<int>(list_idx * num_devices * keys_per_thread +
+                                                  i * keys_per_thread + b);
                     auto basic_desc =
                         initBasicDescObj(buffer_size, dev_id, nixlbench::makeMemosKey(key_entropy));
                     if (basic_desc) {
@@ -1168,8 +1170,8 @@ xferBenchNixlWorker::allocateMemory(int num_threads) {
             remote_iovs.push_back(iov_list);
         }
         std::cout << "DOCA_MEMOS: Registered " << total_keys << " keys across " << num_threads
-                  << " threads x " << num_devices << " devices x " << max_batch << " batch"
-                  << std::endl;
+                  << " threads x " << num_devices << " devices x " << keys_per_thread
+                  << " keys/device" << std::endl;
     } else if (xferBenchConfig::isObjStorageBackend()) {
         buffer_size = xferBenchConfig::max_block_size;
 
@@ -1916,6 +1918,58 @@ execTransferLoop(nixlAgent *agent,
                  const std::vector<xferBenchIOV> &local_iov,
                  const std::vector<xferBenchIOV> &remote_iov,
                  const std::atomic<int> *terminate_ptr = nullptr) {
+    if (xferBenchConfig::memos_keys_per_thread != 0) {
+        const size_t batch = xferBenchConfig::max_batch_size;
+        const size_t keys = xferBenchConfig::memos_keys_per_thread;
+        if (local_iov.size() != keys || remote_iov.size() != keys) {
+            std::cerr << "DOCA_MEMOS: key-pool descriptor count mismatch" << std::endl;
+            return -1;
+        }
+
+        // Prepare one request per batch of keys. Only one request per worker is
+        // in flight; the working set grows independently of transfer concurrency.
+        std::vector<slotState> banks(keys / batch);
+        for (size_t bank = 0; bank < banks.size(); ++bank) {
+            auto &slot = banks[bank];
+            const size_t offset = bank * batch;
+            slot.local_iov.assign(local_iov.begin() + offset, local_iov.begin() + offset + batch);
+            slot.remote_iov.assign(remote_iov.begin() + offset,
+                                   remote_iov.begin() + offset + batch);
+            const auto rc =
+                prepareSlot(agent, backend_engine, op, target, params, thread_stats, slot);
+            if (rc != NIXL_SUCCESS) {
+                cleanupSlots(agent, backend_engine, banks);
+                return -1;
+            }
+        }
+        for (int iteration = 0; iteration < num_iter; ++iteration) {
+            if (terminate_ptr && terminate_ptr->load()) {
+                cleanupSlots(agent, backend_engine, banks);
+                return -1;
+            }
+            auto &slot = banks[static_cast<size_t>(iteration) % banks.size()];
+            auto rc = postSlot(agent, thread_stats, slot);
+            if (rc != NIXL_SUCCESS) {
+                cleanupSlots(agent, backend_engine, banks);
+                return -1;
+            }
+            do {
+                if (terminate_ptr && terminate_ptr->load()) {
+                    cleanupSlots(agent, backend_engine, banks);
+                    return -1;
+                }
+                rc = agent->getXferStatus(slot.req);
+            } while (rc == NIXL_IN_PROG);
+            if (rc != NIXL_SUCCESS) {
+                cleanupSlots(agent, backend_engine, banks);
+                return -1;
+            }
+            thread_stats.transfer_duration.add(nixlTime::getUs() - slot.post_ts);
+            slot.in_flight = false;
+        }
+        cleanupSlots(agent, backend_engine, banks);
+        return 0;
+    }
     const int depth = std::min(xferBenchConfig::pipeline_depth, num_iter);
     if (depth < xferBenchConfig::pipeline_depth) {
         std::cout << "Warning: pipeline_depth (" << xferBenchConfig::pipeline_depth
@@ -2423,7 +2477,10 @@ xferBenchNixlWorker::transfer(size_t block_size,
                            local_iovs,
                            remote_iovs,
                            NIXL_WRITE,
-                           1,
+                           xferBenchConfig::memos_keys_per_thread != 0 ?
+                               static_cast<int>(xferBenchConfig::memos_keys_per_thread /
+                                                xferBenchConfig::max_batch_size) :
+                               1,
                            xferBenchConfig::num_threads,
                            prepop_stats);
         if (ret < 0) {
@@ -2441,7 +2498,10 @@ xferBenchNixlWorker::transfer(size_t block_size,
                            local_iovs,
                            remote_iovs,
                            NIXL_READ,
-                           1,
+                           xferBenchConfig::memos_keys_per_thread != 0 ?
+                               static_cast<int>(xferBenchConfig::memos_keys_per_thread /
+                                                xferBenchConfig::max_batch_size) :
+                               1,
                            xferBenchConfig::num_threads,
                            verify_stats);
         if (ret < 0) {
